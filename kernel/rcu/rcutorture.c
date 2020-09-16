@@ -307,6 +307,7 @@ struct rcu_torture_ops {
 	void (*cb_barrier)(void);
 	void (*fqs)(void);
 	void (*stats)(void);
+	void (*gp_kthread_dbg)(void);
 	int (*stall_dur)(void);
 	int irq_capable;
 	int can_boost;
@@ -455,6 +456,7 @@ static struct rcu_torture_ops rcu_ops = {
 	.cb_barrier	= rcu_barrier,
 	.fqs		= rcu_force_quiescent_state,
 	.stats		= NULL,
+	.gp_kthread_dbg	= show_rcu_gp_kthreads,
 	.stall_dur	= rcu_jiffies_till_stall_check,
 	.irq_capable	= 1,
 	.can_boost	= rcu_can_boost(),
@@ -677,6 +679,7 @@ static struct rcu_torture_ops tasks_ops = {
 	.exp_sync	= synchronize_rcu_tasks,
 	.call		= call_rcu_tasks,
 	.cb_barrier	= rcu_barrier_tasks,
+	.gp_kthread_dbg	= show_rcu_tasks_classic_gp_kthread,
 	.fqs		= NULL,
 	.stats		= NULL,
 	.irq_capable	= 1,
@@ -1495,7 +1498,8 @@ rcu_torture_stats_print(void)
 			sched_show_task(wtp);
 			splatted = true;
 		}
-		show_rcu_gp_kthreads();
+		if (cur_ops->gp_kthread_dbg)
+			cur_ops->gp_kthread_dbg();
 		rcu_ftrace_dump(DUMP_ALL);
 	}
 	rtcv_snap = rcu_torture_current_version;
@@ -2202,7 +2206,8 @@ rcu_torture_cleanup(void)
 		return;
 	}
 
-	show_rcu_gp_kthreads();
+	if (cur_ops->gp_kthread_dbg)
+		cur_ops->gp_kthread_dbg();
 	rcu_torture_barrier_cleanup();
 	torture_stop_kthread(rcu_torture_fwd_prog, fwd_prog_task);
 	torture_stop_kthread(rcu_torture_stall, stall_task);
