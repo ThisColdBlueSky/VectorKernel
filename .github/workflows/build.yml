@@ -23,6 +23,7 @@ on:
       - remove-ksu
       - bakasu-manual-hook
       - silver-floor
+      - f2fs-backport
     paths-ignore:
       - '**.md'
       - '.gitignore'
