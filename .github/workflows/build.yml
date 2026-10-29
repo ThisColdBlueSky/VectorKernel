@@ -24,6 +24,7 @@ on:
       - bakasu-manual-hook
       - silver-floor
       - f2fs-backport
+      - arm64-string-backport
     paths-ignore:
       - '**.md'
       - '.gitignore'
