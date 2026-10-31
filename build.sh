@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HizduBoy Kernel Build Script for POCO X4 Pro 5G (veux / peux)
+# Vector Kernel Build Script for POCO X4 Pro 5G (veux / peux)
 # Supports Normal, KernelSU, and Unified dual-mode AnyKernel3 packages.
 
 set -euo pipefail
@@ -86,7 +86,7 @@ compile_flavor() {
     local flavor="$1"
     local out_dir="$OUT_BASE/$flavor"
     echo "=========================================="
-    echo "Building HizduBoy Kernel: flavor=$flavor"
+    echo "Building Vector Kernel: flavor=$flavor"
     echo "=========================================="
 
     mkdir -p "$out_dir"
@@ -134,9 +134,9 @@ compile_flavor() {
     # 5. Package AnyKernel3 Zip
     local zip_name
     if [ "$flavor" = "ksu" ]; then
-        zip_name="HizduBoy-veux-${BUILD_DATE}-KSU.zip"
+        zip_name="Vector-veux-${BUILD_DATE}-KSU.zip"
     else
-        zip_name="HizduBoy-veux-${BUILD_DATE}-Standard.zip"
+        zip_name="Vector-veux-${BUILD_DATE}-Standard.zip"
     fi
 
     local pkg_dir="$out_dir/ak3_pkg"
@@ -186,7 +186,7 @@ if [ "$VARIANT" = "both" ]; then
                  "$local_unified_dir/META-INF/com/google/android/update-binary" \
                  "$local_unified_dir"/tools/* 2>/dev/null || true
 
-        unified_zip="HizduBoy-veux-${BUILD_DATE}-Unified.zip"
+        unified_zip="Vector-veux-${BUILD_DATE}-Unified.zip"
         (cd "$local_unified_dir" && zip -r9 "$DIST_DIR/$unified_zip" * -x ".git*" "README.md")
         (cd "$DIST_DIR" && sha256sum "$unified_zip" > "$unified_zip.sha256")
         echo "==> Successfully packaged: $DIST_DIR/$unified_zip"

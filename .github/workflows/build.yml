@@ -1,4 +1,4 @@
-name: Build HizduBoy Kernel
+name: Build Vector Kernel
 
 on:
   workflow_dispatch:
@@ -12,6 +12,15 @@ on:
           - both
           - ksu
           - normal
+      edition:
+        description: 'Kernel edition to build (plus uses vector_defconfig)'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - standard
+          - plus
       create_release:
         description: 'Publish GitHub Release'
         required: false
@@ -89,6 +98,13 @@ jobs:
           echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_ENV
           echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
 
+          if [ "${{ matrix.edition }}" = "plus" ]; then
+            echo "DEFCONFIG=vector_defconfig" >> $GITHUB_ENV
+            echo "ZIP_PREFIX=Vector-veux-plus" >> $GITHUB_ENV
+          else
+            echo "DEFCONFIG=veux_defconfig" >> $GITHUB_ENV
+            echo "ZIP_PREFIX=Vector-veux" >> $GITHUB_ENV
+          fi
       - name: Install Build Dependencies
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
@@ -96,7 +112,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ccache curl flex \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            git libssl-dev libelf-dev lz4 xz-utils zip bsdiff python3
+            git libssl-dev libelf-dev lz4 xz-utils zip python3
 
       - name: Download & Set up Clang (LLVM 22.1.7)
         if: steps.check_variant.outputs.should_run == 'true'
@@ -213,7 +229,7 @@ jobs:
         if: steps.check_variant.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: HizduBoy-veux-${{ matrix.variant }}
+          name: Vector-veux-${{ matrix.edition }}-${{ matrix.variant }}
           path: build_output/*
           retention-days: 7
 
@@ -235,7 +251,7 @@ jobs:
       - name: Install Packaging Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bsdiff zip
+          sudo apt-get install -y zip
 
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
@@ -252,35 +268,6 @@ jobs:
           find all_artifacts -name "*.zip" -exec cp {} release_assets/ \;
           find all_artifacts -name "*.sha256" -exec cp {} release_assets/ \;
 
-          # Find raw Image files to create unified bsdiff zip if both were built
-          IMAGE_NORMAL=$(find all_artifacts -name "Image_normal" | head -n 1)
-          IMAGE_KSU=$(find all_artifacts -name "Image_ksu" | head -n 1)
-          DTB_FILE=$(find all_artifacts -name "dtb" | head -n 1)
-
-          if [ -n "$IMAGE_NORMAL" ] && [ -n "$IMAGE_KSU" ] && [ -n "$DTB_FILE" ]; then
-            echo "Both normal and KSU images present. Creating Unified bsdiff zip..."
-            bsdiff "$IMAGE_NORMAL" "$IMAGE_KSU" ksu.bdf
-
-            UNIFIED_DIR="package_unified"
-            mkdir -p "$UNIFIED_DIR"
-            cp -r anykernel/* "$UNIFIED_DIR"/
-            cp "$IMAGE_NORMAL" "$UNIFIED_DIR"/Image
-            cp "$DTB_FILE" "$UNIFIED_DIR"/dtb
-            cp ksu.bdf "$UNIFIED_DIR"/ksu.bdf
-
-            chmod +x "$UNIFIED_DIR"/anykernel.sh \
-                     "$UNIFIED_DIR"/META-INF/com/google/android/update-binary \
-                     "$UNIFIED_DIR"/tools/* 2>/dev/null || true
-
-            UNIFIED_ZIP="HizduBoy-veux-${BUILD_DATE}-Unified.zip"
-            cd "$UNIFIED_DIR"
-            zip -r9 "../release_assets/${UNIFIED_ZIP}" * -x ".git*" "README.md"
-            cd ..
-
-            cd release_assets
-            sha256sum "${UNIFIED_ZIP}" > "${UNIFIED_ZIP}.sha256"
-            cd ..
-          fi
 
           echo "Final release assets:"
           ls -la release_assets/
@@ -292,19 +279,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.TAG_NAME }}
-          name: HizduBoy Kernel for POCO X4 Pro 5G (${{ env.TAG_NAME }})
+          name: Vector Kernel for POCO X4 Pro 5G (${{ env.TAG_NAME }})
           draft: false
           prerelease: false
           files: release_assets/*
           body: |
-            ## HizduBoy Kernel for POCO X4 Pro 5G (`veux` / `peux`)
+            ## Vector Kernel for POCO X4 Pro 5G (`veux` / `peux`)
             
             - **Commit:** `${{ github.sha }}`
             - **Branch:** `${{ github.ref_name }}`
-            - **Kernel Release:** `5.4.302~HizduBoy`
+            - **Kernel Release:** `5.4.302~Vector`
             
             ### Included Packages:
-            - **`HizduBoy-veux-*-Standard.zip`**: Non-root clean kernel.
-            - **`HizduBoy-veux-*-KSU.zip`**: KernelSU root support pre-compiled into `Image`.
-            - **`HizduBoy-veux-*-Unified.zip`**: Dual-mode package using `ksu.bdf` delta patch (matches upstream release format).
-
+            **Normal (non-plus):**
+            - **`Vector-veux-*-Standard.zip`**: Non-root clean kernel.
+            - **`Vector-veux-*-KSU.zip`**: KernelSU root support pre-compiled into `Image`.
+            
+            **Plus (`vector_defconfig`):**
+            - **`Vector-veux-plus-*-Standard.zip`**: Non-root plus kernel.
+            - **`Vector-veux-plus-*-KSU.zip`**: Plus kernel with KernelSU pre-compiled into `Image`.
