@@ -26,6 +26,15 @@ on:
         required: false
         default: false
         type: boolean
+      debug_level:
+        description: 'Debug configuration level'
+        required: false
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - basic
+          - full
   push:
     branches:
       - main
@@ -160,6 +169,21 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             olddefconfig
 
+          DEBUG_LEVEL="${{ github.event.inputs.debug_level || 'none' }}"
+          if [ "$DEBUG_LEVEL" = "basic" ] || [ "$DEBUG_LEVEL" = "full" ]; then
+            echo "Applying basic debug options (DEBUG_VM, DEBUG_LIST, DEBUG_RWSEMS, TEST_MAPLE_TREE=y)..."
+            bash ./scripts/config --file out/.config -e DEBUG_VM -e DEBUG_LIST -e DEBUG_RWSEMS -e TEST_MAPLE_TREE
+          fi
+          if [ "$DEBUG_LEVEL" = "full" ]; then
+            echo "Applying full debug options (DEBUG_VM_RB, DEBUG_VM_MAPLE_TREE)..."
+            bash ./scripts/config --file out/.config -e DEBUG_VM_RB -e DEBUG_VM_MAPLE_TREE
+          fi
+          if [ "$DEBUG_LEVEL" = "basic" ] || [ "$DEBUG_LEVEL" = "full" ]; then
+            make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+              CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+              olddefconfig
+          fi
+
       - name: Compile Kernel & DTB
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
@@ -173,7 +197,26 @@ jobs:
             CC="ccache clang" LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             KCFLAGS="-Wno-error" \
-            Image dtbs
+            Image dtbs 2>&1 | tee build.log
+
+      - name: Audit Build Warnings & Upload Config/Log Artifacts
+        if: steps.check_variant.outputs.should_run == 'true' && (always())
+        run: |
+          echo "=== Auditing build log for relevant warnings ==="
+          if [ -f build.log ]; then
+            grep -E "(warning:.*(mm/|lib/maple_tree|kernel/fork|fs/proc|fs/exec))|(implicit declaration)|(incompatible pointer)" build.log || echo "No matching warnings found."
+          fi
+          cp out/.config ./build_config_${{ matrix.edition }}_${{ matrix.variant }}.txt || true
+
+      - name: Upload Build Log & Config Artifacts
+        if: steps.check_variant.outputs.should_run == 'true' && (always())
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-and-config-${{ matrix.edition }}-${{ matrix.variant }}
+          path: |
+            build.log
+            build_config_${{ matrix.edition }}_${{ matrix.variant }}.txt
+          retention-days: 7
 
       - name: Verify Build Outputs
         if: steps.check_variant.outputs.should_run == 'true'
