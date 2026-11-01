@@ -593,9 +593,6 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		prev = tmp;
 		mm->map_count++;
 
-		if (tmp->vm_ops && tmp->vm_ops->open)
-			tmp->vm_ops->open(tmp);
-
 		file = tmp->vm_file;
 		if (file) {
 			struct inode *inode = file_inode(file);
@@ -617,6 +614,9 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 
 		if (!(tmp->vm_flags & VM_WIPEONFORK))
 			retval = copy_page_range(mm, oldmm, mpnt);
+
+		if (tmp->vm_ops && tmp->vm_ops->open)
+			tmp->vm_ops->open(tmp);
 
 		if (retval)
 			goto loop_out;
