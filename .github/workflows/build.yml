@@ -187,6 +187,7 @@ jobs:
       - name: Compile Kernel & DTB
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
+          set -eo pipefail
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
