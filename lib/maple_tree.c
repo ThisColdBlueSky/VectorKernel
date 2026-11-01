@@ -5621,6 +5621,7 @@ int mas_preallocate(struct ma_state *mas, void *entry, gfp_t gfp)
 	 */
 	request = 1 + mas_mt_height(mas) * 3;
 
+	mas->mas_flags &= ~MA_STATE_PREALLOC;
 	mas_node_count_gfp(mas, request, gfp);
 	if (likely(!mas_is_err(mas))) {
 		mas->mas_flags |= MA_STATE_PREALLOC;
