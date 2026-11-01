@@ -643,27 +643,22 @@ static unsigned long count_mm_mlocked_page_nr(struct mm_struct *mm,
 {
 	struct vm_area_struct *vma;
 	unsigned long count = 0;
+	unsigned long end = start + len;
 
 	if (mm == NULL)
 		mm = current->mm;
 
-	vma = find_vma(mm, start);
-	if (vma == NULL)
-		vma = mm->mmap;
+	{
+		VMA_ITERATOR(vmi, mm, start);
 
-	for (; vma ; vma = vma->vm_next) {
-		if (start >= vma->vm_end)
-			continue;
-		if (start + len <=  vma->vm_start)
-			break;
-		if (vma->vm_flags & VM_LOCKED) {
-			if (start > vma->vm_start)
-				count -= (start - vma->vm_start);
-			if (start + len < vma->vm_end) {
-				count += start + len - vma->vm_start;
-				break;
+		for_each_vma_range(vmi, vma, end) {
+			if (vma->vm_flags & VM_LOCKED) {
+				unsigned long this_start = max(start, vma->vm_start);
+				unsigned long this_end = min(end, vma->vm_end);
+
+				if (this_start < this_end)
+					count += (this_end - this_start);
 			}
-			count += vma->vm_end - vma->vm_start;
 		}
 	}
 

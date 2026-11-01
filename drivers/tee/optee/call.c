@@ -576,7 +576,7 @@ static int __check_mem_type(struct vm_area_struct *vma, unsigned long end)
 	while (vma && is_normal_memory(vma->vm_page_prot)) {
 		if (vma->vm_end >= end)
 			return 0;
-		vma = vma->vm_next;
+		vma = find_vma(vma->vm_mm, vma->vm_end);
 	}
 
 	return -EINVAL;
