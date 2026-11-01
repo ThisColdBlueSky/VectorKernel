@@ -2461,8 +2461,6 @@ extern int split_vma(struct mm_struct *, struct vm_area_struct *,
 extern int insert_vm_struct(struct mm_struct *, struct vm_area_struct *);
 void vma_mas_store(struct vm_area_struct *vma, struct ma_state *mas);
 void vma_mas_remove(struct vm_area_struct *vma, struct ma_state *mas);
-int vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
-	     struct vm_area_struct *prev);
 extern void unlink_file_vma(struct vm_area_struct *);
 extern struct vm_area_struct *copy_vma(struct vm_area_struct **,
 	unsigned long addr, unsigned long len, pgoff_t pgoff,
