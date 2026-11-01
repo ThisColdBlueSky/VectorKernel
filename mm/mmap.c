@@ -3065,7 +3065,7 @@ void exit_mmap(struct mm_struct *mm)
 
 	vma = mm->mmap;
 	if (!vma)	/* Can happen if dup_mmap() received an OOM */
-		return;
+		goto destroy;
 
 	lru_add_drain();
 	flush_cache_mm(mm);
@@ -3087,6 +3087,7 @@ void exit_mmap(struct mm_struct *mm)
 		cond_resched();
 	}
 
+destroy:
 	trace_exit_mmap(mm);
 	mmap_write_lock(mm);
 	__mt_destroy(&mm->mm_mt);
