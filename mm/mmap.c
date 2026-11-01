@@ -3088,7 +3088,9 @@ void exit_mmap(struct mm_struct *mm)
 	}
 
 	trace_exit_mmap(mm);
+	mmap_write_lock(mm);
 	__mt_destroy(&mm->mm_mt);
+	mmap_write_unlock(mm);
 	vm_unacct_memory(nr_accounted);
 }
 
