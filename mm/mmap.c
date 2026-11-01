@@ -2666,14 +2666,15 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	if (!vma)
 		return 0;
 
-	if (mas_preallocate(&mas, vma, GFP_KERNEL))
-		return -ENOMEM;
 	prev = vma->vm_prev;
 	/* we have  start < vma->vm_end  */
 
 	/* if it doesn't overlap, we have nothing.. */
 	if (vma->vm_start >= end)
 		return 0;
+
+	if (mas_preallocate(&mas, vma, GFP_KERNEL))
+		return -ENOMEM;
 
 	/*
 	 * If we need to split any vma, do it now to save pain later.
