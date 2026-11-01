@@ -2234,6 +2234,7 @@ proc_map_files_readdir(struct file *file, struct dir_context *ctx)
 	struct vm_area_struct *vma;
 	struct task_struct *task;
 	struct mm_struct *mm;
+	struct vma_iterator vmi;
 	unsigned long nr_files, pos, i;
 	GENRADIX(struct map_files_info) fa;
 	struct map_files_info *p;
@@ -2276,7 +2277,7 @@ proc_map_files_readdir(struct file *file, struct dir_context *ctx)
 	 * routine might require mmap_sem taken in might_fault().
 	 */
 
-	VMA_ITERATOR(vmi, mm, 0);
+	vma_iter_init(&vmi, mm, 0);
 
 	pos = 2;
 	for_each_vma(vmi, vma) {
