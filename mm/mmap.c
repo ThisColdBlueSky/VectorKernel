@@ -758,7 +758,8 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 	if (end != vma->vm_end) {
 		unsigned long old_end = vma->vm_end;
 		WRITE_ONCE(vma->vm_end, end);
-		if (old_end > end)
+		if (old_end > end && (old_end + adjust_next != end) &&
+		    (!insert || (insert->vm_start != end)))
 			vma_mas_szero(&mas, end, old_end);
 		end_changed = true;
 	}
