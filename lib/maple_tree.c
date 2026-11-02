@@ -5814,6 +5814,7 @@ EXPORT_SYMBOL_GPL(mas_next);
  *
  * Return: The next entry or %NULL
  */
+/* UNUSED: post-6.1 helper with no callers in 5.4 kernel tree */
 void *mas_next_range(struct ma_state *mas, unsigned long max)
 {
 	void *entry = NULL;
@@ -5921,6 +5922,7 @@ EXPORT_SYMBOL_GPL(mas_prev);
  *
  * Return: the previous value or %NULL.
  */
+/* UNUSED: post-6.1 helper with no callers in 5.4 kernel tree */
 void *mas_prev_range(struct ma_state *mas, unsigned long min)
 {
 	void *entry = NULL;
@@ -6065,6 +6067,7 @@ EXPORT_SYMBOL_GPL(mas_find);
  *
  * Return: The entry or %NULL.
  */
+/* UNUSED: post-6.1 helper with no callers in 5.4 kernel tree */
 void *mas_find_range(struct ma_state *mas, unsigned long max)
 {
 	void *entry;
@@ -6182,6 +6185,7 @@ EXPORT_SYMBOL_GPL(mas_find_rev);
  *
  * Return: The entry or %NULL.
  */
+/* UNUSED: post-6.1 helper with no callers in 5.4 kernel tree */
 void *mas_find_range_rev(struct ma_state *mas, unsigned long min)
 {
 	void *entry;
@@ -6721,6 +6725,7 @@ set_new_tree:
  * the attributes of the two trees are different or the new tree is not an empty
  * tree.
  */
+/* UNUSED: post-6.1 tree duplication helper with no callers in 5.4 kernel tree */
 int __mt_dup(struct maple_tree *mt, struct maple_tree *new, gfp_t gfp)
 {
 	int ret = 0;
@@ -6758,6 +6763,7 @@ EXPORT_SYMBOL(__mt_dup);
  * the attributes of the two trees are different or the new tree is not an empty
  * tree.
  */
+/* UNUSED: post-6.1 tree duplication helper with no callers in 5.4 kernel tree */
 int mtree_dup(struct maple_tree *mt, struct maple_tree *new, gfp_t gfp)
 {
 	int ret = 0;
