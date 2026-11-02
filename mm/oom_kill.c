@@ -535,7 +535,10 @@ bool __oom_reap_task_mm(struct mm_struct *mm)
 	 */
 	set_bit(MMF_UNSTABLE, &mm->flags);
 
-	for (vma = mm->mmap ; vma; vma = vma->vm_next) {
+	{
+		VMA_ITERATOR(vmi, mm, 0);
+
+		for_each_vma(vmi, vma) {
 		if (!can_madv_lru_vma(vma))
 			continue;
 
@@ -566,6 +569,7 @@ bool __oom_reap_task_mm(struct mm_struct *mm)
 			mmu_notifier_invalidate_range_end(&range);
 			tlb_finish_mmu(&tlb, range.start, range.end);
 		}
+	}
 	}
 
 	return ret;

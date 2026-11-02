@@ -1766,7 +1766,7 @@ long ksys_shmdt(char __user *shmaddr)
 
 #ifdef CONFIG_MMU
 	while (vma) {
-		next = vma->vm_next;
+		next = find_vma(mm, vma->vm_end);
 
 		/*
 		 * Check if the starting address would match, i.e. it's
@@ -1805,7 +1805,7 @@ long ksys_shmdt(char __user *shmaddr)
 	 */
 	size = PAGE_ALIGN(size);
 	while (vma && (loff_t)(vma->vm_end - addr) <= size) {
-		next = vma->vm_next;
+		next = find_vma(mm, vma->vm_end);
 
 		/* finding a matching vma now does not alter retval */
 		if ((vma->vm_ops == &shm_vm_ops) &&

@@ -578,6 +578,12 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 			goto out;
 		}
 
+		/* Allow architectures to sanity-check the new flags */
+		if (!arch_validate_flags(newflags)) {
+			error = -EINVAL;
+			goto out;
+		}
+
 		error = security_file_mprotect(vma, reqprot, prot);
 		if (error)
 			goto out;
@@ -595,7 +601,7 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 		if (nstart >= end)
 			goto out;
 
-		vma = prev->vm_next;
+		vma = find_vma(current->mm, nstart);
 		if (!vma || vma->vm_start != nstart) {
 			error = -ENOMEM;
 			goto out;

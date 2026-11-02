@@ -1996,7 +1996,7 @@ static unsigned int khugepaged_scan_mm_slot(unsigned int pages,
 		vma = find_vma(mm, khugepaged_scan.address);
 
 	progress++;
-	for (; vma; vma = vma->vm_next) {
+	for (; vma; vma = find_vma(mm, vma->vm_end)) {
 		unsigned long hstart, hend;
 
 		cond_resched();

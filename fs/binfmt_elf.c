@@ -1605,8 +1605,11 @@ static int fill_files_note(struct memelfnote *note)
 	name_base = name_curpos = ((char *)data) + names_ofs;
 	remaining = size - names_ofs;
 	count = 0;
-	for (vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
-		struct file *file;
+	{
+		VMA_ITERATOR(vmi, current->mm, 0);
+
+		for_each_vma(vmi, vma) {
+			struct file *file;
 		const char *filename;
 
 		file = vma->vm_file;
@@ -1633,6 +1636,7 @@ static int fill_files_note(struct memelfnote *note)
 		*start_end_ofs++ = vma->vm_end;
 		*start_end_ofs++ = vma->vm_pgoff;
 		count++;
+		}
 	}
 
 	/* Now we know exact count of files, can store it */

@@ -186,9 +186,18 @@ static void vma_stop(struct proc_maps_private *priv)
 static struct vm_area_struct *
 m_next_vma(struct proc_maps_private *priv, struct vm_area_struct *vma)
 {
+	struct mm_struct *mm = priv->mm;
+	unsigned long index = vma->vm_end;
+	struct vm_area_struct *next;
+
 	if (vma == priv->tail_vma)
 		return NULL;
-	return vma->vm_next ?: priv->tail_vma;
+
+	next = mt_find(&mm->mm_mt, &index, ULONG_MAX);
+	if (next)
+		return next;
+
+	return priv->tail_vma;
 }
 
 static void m_cache_vma(struct seq_file *m, struct vm_area_struct *vma)
@@ -235,11 +244,17 @@ static void *m_start(struct seq_file *m, loff_t *ppos)
 
 	m->version = 0;
 	if (pos < mm->map_count) {
-		for (vma = mm->mmap; pos; pos--) {
-			m->version = vma->vm_start;
-			vma = vma->vm_next;
+		MA_STATE(mas, &mm->mm_mt, 0, 0);
+
+		mas_for_each(&mas, vma, ULONG_MAX) {
+			if (!pos)
+				break;
+			pos--;
 		}
-		return vma;
+		if (vma) {
+			m->version = vma->vm_start;
+			return vma;
+		}
 	}
 
 	/* we do not bother to update m->version in this case */
@@ -1135,9 +1150,13 @@ static int show_smaps_rollup(struct seq_file *m, void *v)
 
 	hold_task_mempolicy(priv);
 
-	for (vma = priv->mm->mmap; vma; vma = vma->vm_next) {
-		smap_gather_stats(vma, &mss);
-		last_vma_end = vma->vm_end;
+	{
+		VMA_ITERATOR(vmi, priv->mm, 0);
+
+		for_each_vma(vmi, vma) {
+			smap_gather_stats(vma, &mss);
+			last_vma_end = vma->vm_end;
+		}
 	}
 
 	show_vma_header_prefix(m, priv->mm->mmap ? priv->mm->mmap->vm_start : 0,
@@ -1440,7 +1459,9 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 			goto out_mm;
 		}
 		if (type == CLEAR_REFS_SOFT_DIRTY) {
-			for (vma = mm->mmap; vma; vma = vma->vm_next) {
+			VMA_ITERATOR(vmi, mm, 0);
+
+			for_each_vma(vmi, vma) {
 				if (!(vma->vm_flags & VM_SOFTDIRTY))
 					continue;
 				up_read(&mm->mmap_sem);
@@ -1466,9 +1487,13 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 					up_write(&mm->mmap_sem);
 					goto out_mm;
 				}
-				for (vma = mm->mmap; vma; vma = vma->vm_next) {
-					vma->vm_flags &= ~VM_SOFTDIRTY;
-					vma_set_page_prot(vma);
+				{
+					VMA_ITERATOR(vmi2, mm, 0);
+
+					for_each_vma(vmi2, vma) {
+						vma->vm_flags &= ~VM_SOFTDIRTY;
+						vma_set_page_prot(vma);
+					}
 				}
 				downgrade_write(&mm->mmap_sem);
 				break;

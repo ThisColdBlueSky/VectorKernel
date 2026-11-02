@@ -967,6 +967,7 @@ static int unmerge_and_remove_all_rmap_items(void)
 	struct mm_slot *mm_slot;
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
+	struct vma_iterator vmi;
 	int err = 0;
 
 	spin_lock(&ksm_mmlist_lock);
@@ -978,7 +979,8 @@ static int unmerge_and_remove_all_rmap_items(void)
 			mm_slot != &ksm_mm_head; mm_slot = ksm_scan.mm_slot) {
 		mm = mm_slot->mm;
 		down_read(&mm->mmap_sem);
-		for (vma = mm->mmap; vma; vma = vma->vm_next) {
+		vma_iter_init(&vmi, mm, 0);
+		for_each_vma(vmi, vma) {
 			if (ksm_test_exit(mm))
 				break;
 			if (!(vma->vm_flags & VM_MERGEABLE) || !vma->anon_vma)
@@ -2292,7 +2294,7 @@ next_mm:
 	else
 		vma = find_vma(mm, ksm_scan.address);
 
-	for (; vma; vma = vma->vm_next) {
+	for (; vma; vma = find_vma(mm, vma->vm_end)) {
 		if (!(vma->vm_flags & VM_MERGEABLE))
 			continue;
 		if (ksm_scan.address < vma->vm_start)
