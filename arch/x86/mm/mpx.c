@@ -54,7 +54,7 @@ static unsigned long mpx_mmap(unsigned long len)
 
 	down_write(&mm->mmap_sem);
 	addr = do_mmap(NULL, 0, len, PROT_READ | PROT_WRITE,
-		       MAP_ANONYMOUS | MAP_PRIVATE, VM_MPX, 0, &populate, NULL);
+		       MAP_ANONYMOUS | MAP_PRIVATE, 0, &populate, NULL);
 	up_write(&mm->mmap_sem);
 	if (populate)
 		mm_populate(addr, populate);
