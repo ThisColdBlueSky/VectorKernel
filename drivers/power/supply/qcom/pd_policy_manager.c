@@ -15,6 +15,8 @@
 #include <linux/iio/consumer.h>
 #include "pd_policy_manager.h"
 
+extern bool wt_chg_is_bypass_active(void);
+
 #define PCA_PPS_CMD_RETRY_COUNT	2
 
 #define PD_SRC_PDO_TYPE_FIXED       0
@@ -1649,6 +1651,13 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
             usbpd_vol_exit(pdpm);
     }
 
+    if (wt_chg_is_bypass_active() && pdpm->state != PD_PM_STATE_ENTRY && pdpm->state != PD_PM_STATE_FC2_EXIT) {
+        pr_notice("bypass active, exiting flash charge mid-session from state %d\n", pdpm->state);
+        stop_sw = false;
+        pdpm->sw.charge_enabled = false;
+        usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
+    }
+
     switch (pdpm->state) {
     case PD_PM_STATE_ENTRY:
         stop_sw = false;
@@ -1658,7 +1667,7 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
             pr_notice("batt_volt-%d, waiting...\n", pdpm->cp.vbat_volt);
         } else if (bat_temp >= CHG_BAT_TEMP_45 || bat_temp < CHG_BAT_TEMP_MIN) {
 			pr_notice("bat_temp-%d is too high for cp", bat_temp);
-        } else if (pdpm->pps_leave) {
+        } else if (pdpm->pps_leave || wt_chg_is_bypass_active()) {
             pr_notice("bat capacity or therm_curr or pps_leave");
         } else if (pdpm->cp.vbat_volt > pm_config.bat_volt_lp_lmt - 100) {
             pr_notice("batt_volt-%d is too high for cp,\
@@ -1853,7 +1862,7 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 	    usbpd_pps_enable_charging(pdpm,false,5000,3000);
             rc = 1;
         }
-		if (!pdpm->pps_temp_flag || pdpm->pps_leave) {
+		if (!pdpm->pps_temp_flag || pdpm->pps_leave || wt_chg_is_bypass_active()) {
 			pr_notice("temp is high or low waiting...\n");
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_ENTRY);
 			pdpm->pd_active = false;

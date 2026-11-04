@@ -439,9 +439,17 @@ struct batt_chg {
 	int usb_float;
 	int power_supply_count;
 	bool isln8000flg;
+	int bypass_mode;
+	struct mutex bypass_lock;
 };
 
 struct batt_chg *g_batt_chg;
+
+bool wt_chg_is_bypass_active(void)
+{
+	return g_batt_chg ? !!READ_ONCE(g_batt_chg->bypass_mode) : false;
+}
+EXPORT_SYMBOL(wt_chg_is_bypass_active);
 
 int get_iio_channel(struct batt_chg *chg, const char *propname,
                                         struct iio_channel **chan)
@@ -908,6 +916,9 @@ static int sw_battery_recharge(struct batt_chg *chg)
 	int r_soc;
 	int en = 0;
 
+	if (READ_ONCE(chg->bypass_mode))
+		return 0;
+
 	batt_get_iio_channel(chg, BMS, BATT_QG_CC_SOC, &r_soc);
 	if(r_soc <= 9750 && chg->charge_done && r_soc > 9000){
 		en = 0;
@@ -1290,6 +1301,8 @@ static int sw_battery_jeita(struct batt_chg *chg)
 		batt_set_iio_channel(chg, MAIN, MAIN_CHAGER_CURRENT, cur);
 	}
 	batt_set_iio_channel(chg, MAIN, MAIN_INPUT_CURRENT_SETTLED, input_cur);
+	if (READ_ONCE(chg->bypass_mode))
+		batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, 0);
 	pr_err("temp = %d,input_cur %d curr=%d, en %d, is_pps %d,mtbf_current %d, type %d cv_flag %d , input_limit_flag %d\n",
 		temp, input_cur, cur, en, chg->is_pps_on, chg->mtbf_current, type, chg->cv_flag, chg->input_limit_flag);
 
@@ -1568,6 +1581,8 @@ static int batt_psy_get_prop(struct power_supply *psy,
 			pval->intval = POWER_SUPPLY_STATUS_FULL;
 		if(chg->usb_temp > 680 && pval->intval == POWER_SUPPLY_STATUS_CHARGING)
 			pval->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+		if (READ_ONCE(chg->bypass_mode))
+			pval->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
 		rc = get_prop_batt_health(chg, pval);
@@ -2083,6 +2098,15 @@ static void batt_chg_main(struct work_struct *work)
 				batt_set_iio_channel(chg, CP_SLAVE, CHARGE_PUMP_SC_ADC_ENABLE, chg->cp_slave_adc);
 			}
 		}
+		if (READ_ONCE(chg->bypass_mode) && soc < 10) {
+			mutex_lock(&chg->bypass_lock);
+			if (READ_ONCE(chg->bypass_mode)) {
+				WRITE_ONCE(chg->bypass_mode, 0);
+				batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, 1);
+				pr_warn("wt_chg: battery low (%d%% < 10%%), bypass auto-cleared\n", soc);
+			}
+			mutex_unlock(&chg->bypass_lock);
+		}
 		sw_battery_jeita(chg);
 		sw_battery_set_cv(chg);
 		if (chg->real_type == POWER_SUPPLY_TYPE_USB || chg->real_type == POWER_SUPPLY_TYPE_USB_CDP)
@@ -2121,6 +2145,20 @@ static void batt_chg_main(struct work_struct *work)
 			__pm_relax(chg->wt_ws);
 			chg->wakeup_flag = 0;
 			pr_err("wt workup relax\n");
+		}
+		if (READ_ONCE(chg->bypass_mode)) {
+			int bq_vbus = 0;
+			int rc = batt_get_iio_channel(chg, MAIN, MAIN_BUS_VOLTAGE, &bq_vbus);
+			if (rc >= 0 && bq_vbus < 4000) {
+				mutex_lock(&chg->bypass_lock);
+				if (READ_ONCE(chg->bypass_mode)) {
+					WRITE_ONCE(chg->bypass_mode, 0);
+					batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, 1);
+					pr_info("wt_chg: cable unplugged (bq_vbus=%d mV), bypass auto-cleared\n",
+						bq_vbus);
+				}
+				mutex_unlock(&chg->bypass_lock);
+			}
 		}
 		if (soc != chg->old_capacity || temp > 550 || chg->power_supply_count >= 6 || soc <= 10) {
 			chg->power_supply_count = 0;
@@ -2859,6 +2897,49 @@ static ssize_t connector_temp_store(struct class *c,
 }
 static CLASS_ATTR_RW(connector_temp);
 
+static ssize_t bypass_charger_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	struct batt_chg *chg = container_of(c, struct batt_chg,
+						battery_class);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(chg->bypass_mode));
+}
+
+static ssize_t bypass_charger_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct batt_chg *chg = container_of(c, struct batt_chg,
+						battery_class);
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	val = !!val;
+
+	mutex_lock(&chg->bypass_lock);
+	if (READ_ONCE(chg->bypass_mode) == val) {
+		mutex_unlock(&chg->bypass_lock);
+		return count;
+	}
+
+	WRITE_ONCE(chg->bypass_mode, val);
+	if (val)
+		batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, 0);
+	mutex_unlock(&chg->bypass_lock);
+
+	power_supply_changed(chg->usb_psy);
+	power_supply_changed(chg->batt_psy);
+	cancel_delayed_work(&chg->batt_chg_work);
+	schedule_delayed_work(&chg->batt_chg_work, 0);
+
+	pr_info("wt_chg: bypass mode set to %d\n", val);
+	return count;
+}
+static CLASS_ATTR_RW(bypass_charger);
+
 static struct attribute *battery_class_attrs[] = {
 	&class_attr_soc_decimal.attr,
 	&class_attr_shutdown_delay.attr,
@@ -2895,6 +2976,7 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_soh.attr,
 	&class_attr_resistance.attr,
 	&class_attr_connector_temp.attr,
+	&class_attr_bypass_charger.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(battery_class);
@@ -3434,6 +3516,8 @@ static int batt_chg_probe(struct platform_device *pdev)
 	batt_chg->pdev = pdev;
 	platform_set_drvdata(pdev, batt_chg);
 
+	mutex_init(&batt_chg->bypass_lock);
+	batt_chg->bypass_mode = 0;
 	g_batt_chg = batt_chg;
 
 	rc = batt_init_iio_psy(batt_chg);
