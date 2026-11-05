@@ -30,6 +30,7 @@ on:
     branches:
       - main
       - arm64-string-backport
+      - bbrv3-backport
     paths-ignore:
       - '**.md'
       - '.gitignore'
