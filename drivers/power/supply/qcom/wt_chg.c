@@ -2960,7 +2960,14 @@ static ssize_t bypass_charger_store(struct class *c,
 	pr_info("wt_chg: bypass mode set to %d\n", val);
 	return count;
 }
-static CLASS_ATTR_RW(bypass_charger);
+static struct class_attribute class_attr_bypass_charger = {
+	.attr = {
+		.name = "bypass_charger",
+		.mode = 0666,
+	},
+	.show = bypass_charger_show,
+	.store = bypass_charger_store,
+};
 
 static ssize_t usb_icl_override_ma_show(struct class *c,
 					struct class_attribute *attr, char *buf)
@@ -3007,7 +3014,14 @@ static ssize_t usb_icl_override_ma_store(struct class *c,
 	pr_info("wt_chg: usb_icl_override_ma set to %d\n", val);
 	return count;
 }
-static CLASS_ATTR_RW(usb_icl_override_ma);
+static struct class_attribute class_attr_usb_icl_override_ma = {
+	.attr = {
+		.name = "usb_icl_override_ma",
+		.mode = 0666,
+	},
+	.show = usb_icl_override_ma_show,
+	.store = usb_icl_override_ma_store,
+};
 
 static struct attribute *battery_class_attrs[] = {
 	&class_attr_soc_decimal.attr,
