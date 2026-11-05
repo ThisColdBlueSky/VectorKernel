@@ -665,6 +665,12 @@ config TCP_CONG_BBR
 	bufferbloat, policers, or AQM schemes that do not provide a delay
 	signal. It requires the fq ("Fair Queue") pacing packet scheduler.
 
+config TCP_CONG_BBR1
+	tristate "BBRv1 TCP"
+	default n
+	---help---
+	For testing or fallback, a copy of BBRv1.
+
 choice
 	prompt "Default TCP congestion control"
 	default DEFAULT_CUBIC

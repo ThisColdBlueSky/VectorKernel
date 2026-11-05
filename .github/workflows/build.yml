@@ -34,6 +34,7 @@ on:
       - silver-floor
       - f2fs-backport
       - arm64-string-backport
+      - bbrv3-backport
     paths-ignore:
       - '**.md'
       - '.gitignore'
