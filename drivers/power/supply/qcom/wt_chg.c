@@ -441,6 +441,8 @@ struct batt_chg {
 	bool isln8000flg;
 	int bypass_mode;
 	struct mutex bypass_lock;
+	int usb_icl_override_ma;
+	struct mutex icl_lock;
 };
 
 struct batt_chg *g_batt_chg;
@@ -1232,6 +1234,13 @@ static int sw_battery_jeita(struct batt_chg *chg)
 			else
 				input_cur = 500;
 			type_cur = 512;
+			if (chg->real_type == POWER_SUPPLY_TYPE_USB) {
+				int override_ma = READ_ONCE(chg->usb_icl_override_ma);
+				if (override_ma > 0) {
+					input_cur = max(input_cur, override_ma);
+					type_cur = max(type_cur, override_ma);
+				}
+			}
 		} else if (type == POWER_SUPPLY_TYPE_USB_CDP) {
 			if(chg->ui_soc == 100)
 				input_cur = 1200;
@@ -2160,6 +2169,19 @@ static void batt_chg_main(struct work_struct *work)
 				mutex_unlock(&chg->bypass_lock);
 			}
 		}
+		if (READ_ONCE(chg->usb_icl_override_ma)) {
+			int bq_vbus = 0;
+			int rc = batt_get_iio_channel(chg, MAIN, MAIN_BUS_VOLTAGE, &bq_vbus);
+			if (rc >= 0 && bq_vbus < 4000) {
+				mutex_lock(&chg->icl_lock);
+				if (READ_ONCE(chg->usb_icl_override_ma)) {
+					WRITE_ONCE(chg->usb_icl_override_ma, 0);
+					pr_info("wt_chg: cable unplugged (bq_vbus=%d mV), usb_icl_override_ma auto-cleared\n",
+						bq_vbus);
+				}
+				mutex_unlock(&chg->icl_lock);
+			}
+		}
 		if (soc != chg->old_capacity || temp > 550 || chg->power_supply_count >= 6 || soc <= 10) {
 			chg->power_supply_count = 0;
 			chg->old_capacity = soc;
@@ -2940,6 +2962,53 @@ static ssize_t bypass_charger_store(struct class *c,
 }
 static CLASS_ATTR_RW(bypass_charger);
 
+static ssize_t usb_icl_override_ma_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	struct batt_chg *chg = container_of(c, struct batt_chg,
+						battery_class);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(chg->usb_icl_override_ma));
+}
+
+static ssize_t usb_icl_override_ma_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct batt_chg *chg = container_of(c, struct batt_chg,
+						battery_class);
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	if (val < 0)
+		return -EINVAL;
+
+	if (val > 0) {
+		if (val < 100)
+			val = 100;
+		else if (val > 1500)
+			val = 1500;
+	}
+
+	mutex_lock(&chg->icl_lock);
+	if (READ_ONCE(chg->usb_icl_override_ma) == val) {
+		mutex_unlock(&chg->icl_lock);
+		return count;
+	}
+
+	WRITE_ONCE(chg->usb_icl_override_ma, val);
+	mutex_unlock(&chg->icl_lock);
+
+	cancel_delayed_work(&chg->batt_chg_work);
+	schedule_delayed_work(&chg->batt_chg_work, 0);
+
+	pr_info("wt_chg: usb_icl_override_ma set to %d\n", val);
+	return count;
+}
+static CLASS_ATTR_RW(usb_icl_override_ma);
+
 static struct attribute *battery_class_attrs[] = {
 	&class_attr_soc_decimal.attr,
 	&class_attr_shutdown_delay.attr,
@@ -2977,6 +3046,7 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_resistance.attr,
 	&class_attr_connector_temp.attr,
 	&class_attr_bypass_charger.attr,
+	&class_attr_usb_icl_override_ma.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(battery_class);
@@ -3518,6 +3588,8 @@ static int batt_chg_probe(struct platform_device *pdev)
 
 	mutex_init(&batt_chg->bypass_lock);
 	batt_chg->bypass_mode = 0;
+	mutex_init(&batt_chg->icl_lock);
+	batt_chg->usb_icl_override_ma = 0;
 	g_batt_chg = batt_chg;
 
 	rc = batt_init_iio_psy(batt_chg);
