@@ -377,9 +377,9 @@ static void f2fs_write_end_io(struct bio *bio)
 		f2fs_bug_on(sbi, page->mapping == NODE_MAPPING(sbi) &&
 					page->index != nid_of_node(page));
 
-		dec_page_count(sbi, type);
 		if (f2fs_in_warm_node_list(sbi, page))
 			f2fs_del_fsync_node_entry(sbi, page);
+		dec_page_count(sbi, type);
 		clear_cold_data(page);
 		end_page_writeback(page);
 	}
@@ -898,6 +898,31 @@ void f2fs_submit_merged_ipu_write(struct f2fs_sb_info *sbi,
 	if (bio && *bio) {
 		bio_put(*bio);
 		*bio = NULL;
+	}
+}
+
+void f2fs_submit_all_merged_ipu_writes(struct f2fs_sb_info *sbi)
+{
+	struct bio_entry *be, *tmp;
+	struct f2fs_bio_info *io;
+	enum temp_type temp;
+
+	for (temp = HOT; temp < NR_TEMP_TYPE; temp++) {
+		LIST_HEAD(list);
+
+		io = sbi->write_io[DATA] + temp;
+
+		if (list_empty(&io->bio_list))
+			continue;
+
+		down_write(&io->bio_list_lock);
+		list_splice_init(&io->bio_list, &list);
+		up_write(&io->bio_list_lock);
+
+		list_for_each_entry_safe(be, tmp, &list, list) {
+			__submit_bio(sbi, be->bio, DATA);
+			del_bio_entry(be);
+		}
 	}
 }
 
@@ -2762,6 +2787,7 @@ int f2fs_write_single_data_page(struct page *page, int *submitted,
 		.submitted = false,
 		.compr_blocks = compr_blocks,
 		.need_lock = LOCK_RETRY,
+		.post_read = f2fs_post_read_required(inode),
 		.io_type = io_type,
 		.io_wbc = wbc,
 		.bio = bio,

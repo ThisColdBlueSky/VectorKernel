@@ -544,7 +544,7 @@ if [ -f banner ]; then
   ui_print " " " ";
 fi;
 
-ui_print "HizduBoy Kernel By THIS COLD BLUE SKY";
+ui_print "Vector Kernel By THIS COLD BLUE SKY";
 KERNEL_STRING="$(file_getprop anykernel.sh kernel.string)";
 ui_print "$KERNEL_STRING";
 if [ -f version ]; then

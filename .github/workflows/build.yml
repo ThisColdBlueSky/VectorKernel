@@ -1,4 +1,4 @@
-name: Build HizduBoy Kernel
+name: Build Vector Kernel
 
 on:
   workflow_dispatch:
@@ -12,17 +12,24 @@ on:
           - both
           - ksu
           - normal
+      edition:
+        description: 'Kernel edition to build (plus uses vector_defconfig)'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - standard
+          - plus
       create_release:
         description: 'Publish GitHub Release'
         required: false
-        default: true
+        default: false
         type: boolean
   push:
     branches:
       - main
-      - remove-ksu
-      - bakasu-manual-hook
-      - silver-floor
+      - arm64-string-backport
       - bbrv3-backport
     paths-ignore:
       - '**.md'
@@ -35,48 +42,44 @@ concurrency:
 
 jobs:
   build:
-    name: Build (${{ matrix.variant }})
+    name: Build (${{ matrix.edition }}-${{ matrix.variant }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         variant: [normal, ksu]
+        edition: [standard, plus]
 
     steps:
       - name: Determine if variant should run
         id: check_variant
         run: |
-          TARGET="${{ github.event.inputs.variant }}"
-          CURRENT="${{ matrix.variant }}"
-          if [ -n "$TARGET" ] && [ "$TARGET" != "both" ] && [ "$TARGET" != "$CURRENT" ]; then
-            echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Skipping $CURRENT because target variant is $TARGET"
-          else
-            echo "should_run=true" >> $GITHUB_OUTPUT
-            echo "Running build for $CURRENT"
+          TARGET_VARIANT="${{ github.event.inputs.variant }}"
+          TARGET_EDITION="${{ github.event.inputs.edition }}"
+          CURRENT_VARIANT="${{ matrix.variant }}"
+          CURRENT_EDITION="${{ matrix.edition }}"
+
+          RUN=true
+          if [ -n "$TARGET_VARIANT" ] && [ "$TARGET_VARIANT" != "both" ] && [ "$TARGET_VARIANT" != "$CURRENT_VARIANT" ]; then
+            RUN=false
+          fi
+          if [ -n "$TARGET_EDITION" ] && [ "$TARGET_EDITION" != "both" ] && [ "$TARGET_EDITION" != "$CURRENT_EDITION" ]; then
+            RUN=false
           fi
 
-      - name: Free Disk Space & Setup 16GB Swap
-        if: steps.check_variant.outputs.should_run == 'true'
-        run: |
-          echo "Freeing disk space..."
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
-          
-          echo "Setting up 16GB swap file to prevent OOM during LTO link..."
-          sudo swapoff -a || true
-          sudo rm -f /swapfile
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
+          echo "should_run=$RUN" >> $GITHUB_OUTPUT
+          if [ "$RUN" = "true" ]; then
+            echo "Running build for $CURRENT_EDITION / $CURRENT_VARIANT"
+          else
+            echo "Skipping $CURRENT_EDITION / $CURRENT_VARIANT (target: variant=$TARGET_VARIANT edition=$TARGET_EDITION)"
+          fi
 
       - name: Checkout Source Code
         if: steps.check_variant.outputs.should_run == 'true'
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Set up Environment Variables
         if: steps.check_variant.outputs.should_run == 'true'
@@ -88,6 +91,14 @@ jobs:
           echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_ENV
           echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
 
+          if [ "${{ matrix.edition }}" = "plus" ]; then
+            echo "DEFCONFIG=vector_defconfig" >> $GITHUB_ENV
+            echo "ZIP_PREFIX=Vector-veux-plus" >> $GITHUB_ENV
+          else
+            echo "DEFCONFIG=veux_defconfig" >> $GITHUB_ENV
+            echo "ZIP_PREFIX=Vector-veux" >> $GITHUB_ENV
+          fi
+
       - name: Install Build Dependencies
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
@@ -95,23 +106,33 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ccache curl flex \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            git libssl-dev libelf-dev lz4 xz-utils zip bsdiff python3
+            git libssl-dev libelf-dev lz4 xz-utils zip python3
 
-      - name: Download & Set up Clang (LLVM 22.1.7)
+      - name: Download & Set up latest LLVM
         if: steps.check_variant.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           mkdir -p llvm
-          echo "Downloading ClangBuiltLinux LLVM ..."
-          curl -sSL --retry 3 "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/LLVM-23.1.4-Linux-X64.tar.xz" | tar -xJ --strip-components=1 -C llvm
+
+          URL=$(curl -sSL --retry 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/llvm/llvm-project/releases/latest \
+            | jq -r '.assets[] | select(.name | test("^LLVM-[0-9.]+-Linux-X64\\.tar\\.xz$")) | .browser_download_url' \
+            | head -n 1)
+
+          if [ -z "$URL" ]; then
+            echo "::error::Could not find a Linux-X64 LLVM asset in the latest release"
+            exit 1
+          fi
+
+          echo "Downloading $URL"
+          curl -sSL --retry 3 "$URL" | tar -xJ --strip-components=1 -C llvm
           echo "$GITHUB_WORKSPACE/llvm/bin" >> $GITHUB_PATH
 
-      - name: Setup ccache
-        if: steps.check_variant.outputs.should_run == 'true'
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: ${{ matrix.variant }}-${{ github.sha }}
-          restore-keys: ${{ matrix.variant }}-
-          max-size: 4G
+          llvm/bin/clang --version
+          llvm/bin/ld.lld --version
 
       - name: Configure Kernel
         if: steps.check_variant.outputs.should_run == 'true'
@@ -120,17 +141,17 @@ jobs:
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
 
-          echo "Generating defconfig..."
+          echo "Generating defconfig: ${DEFCONFIG}"
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            veux_defconfig
+            ${DEFCONFIG}
 
           echo "Enabling ThinLTO to optimize memory footprint during linking..."
           bash ./scripts/config --file out/.config -e THINLTO
 
           if [ "${{ matrix.variant }}" = "ksu" ]; then
             echo "Enabling KernelSU (CONFIG_KSU=y)..."
-            bash ./scripts/config --file out/.config -e KSU
+            bash ./scripts/config --file out/.config -e KSU -e DEBUG_KERNEL -e KALLSYMS -e KALLSYMS_ALL
           else
             echo "Disabling KernelSU (CONFIG_KSU not set)..."
             bash ./scripts/config --file out/.config -d KSU
@@ -139,9 +160,6 @@ jobs:
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             olddefconfig
-
-          echo "=== Resolved memory and debug configs in out/.config ==="
-          grep -E "CONFIG_MEMCG|CONFIG_DEBUG_KERNEL|CONFIG_DEBUG_LIST|CONFIG_DEBUG_ATOMIC_SLEEP" out/.config || true
 
       - name: Compile Kernel & DTB
         if: steps.check_variant.outputs.should_run == 'true'
@@ -180,13 +198,15 @@ jobs:
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
           VARIANT="${{ matrix.variant }}"
+          EDITION="${{ matrix.edition }}"
+
           if [ "$VARIANT" = "ksu" ]; then
-            ZIP_NAME="HizduBoy-veux-${BUILD_DATE}-KSU.zip"
+            ZIP_NAME="${ZIP_PREFIX}-${BUILD_DATE}-KSU.zip"
           else
-            ZIP_NAME="HizduBoy-veux-${BUILD_DATE}-Standard.zip"
+            ZIP_NAME="${ZIP_PREFIX}-${BUILD_DATE}-Standard.zip"
           fi
 
-          PACKAGE_DIR="package_${VARIANT}"
+          PACKAGE_DIR="package_${EDITION}_${VARIANT}"
           mkdir -p "$PACKAGE_DIR"
           cp -r anykernel/* "$PACKAGE_DIR"/
           cp out/arch/arm64/boot/Image "$PACKAGE_DIR"/Image
@@ -205,15 +225,29 @@ jobs:
           mkdir -p build_output
           cp "${ZIP_NAME}" build_output/
           cp "${ZIP_NAME}.sha256" build_output/
-          cp out/arch/arm64/boot/Image "build_output/Image_${VARIANT}"
-          cp "$DTB_PATH" build_output/dtb
+          cp out/arch/arm64/boot/Image "build_output/Image_${EDITION}_${VARIANT}"
+          cp "$DTB_PATH" "build_output/dtb_${EDITION}_${VARIANT}"
+
+          mkdir -p vmlinux_output
+          if [ -f out/vmlinux ]; then
+            echo "Archiving unstripped vmlinux..."
+            gzip -c out/vmlinux > vmlinux_output/vmlinux.gz
+          fi
 
       - name: Upload Build Artifacts
         if: steps.check_variant.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: HizduBoy-veux-${{ matrix.variant }}
+          name: Vector-veux-${{ matrix.edition }}-${{ matrix.variant }}
           path: build_output/*
+          retention-days: 7
+
+      - name: Upload vmlinux Debug Artifact
+        if: steps.check_variant.outputs.should_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmlinux-${{ matrix.edition }}-${{ matrix.variant }}
+          path: vmlinux_output/*
           retention-days: 7
 
   release:
@@ -223,9 +257,9 @@ jobs:
     permissions:
       contents: write
     if: |
-      always() &&
       needs.build.result == 'success' &&
-      (github.event_name == 'push' || inputs.create_release == true || inputs.create_release == 'true')
+      github.event_name == 'workflow_dispatch' &&
+      inputs.create_release == true
 
     steps:
       - name: Checkout Source Code
@@ -234,7 +268,7 @@ jobs:
       - name: Install Packaging Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bsdiff zip
+          sudo apt-get install -y zip
 
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
@@ -251,36 +285,6 @@ jobs:
           find all_artifacts -name "*.zip" -exec cp {} release_assets/ \;
           find all_artifacts -name "*.sha256" -exec cp {} release_assets/ \;
 
-          # Find raw Image files to create unified bsdiff zip if both were built
-          IMAGE_NORMAL=$(find all_artifacts -name "Image_normal" | head -n 1)
-          IMAGE_KSU=$(find all_artifacts -name "Image_ksu" | head -n 1)
-          DTB_FILE=$(find all_artifacts -name "dtb" | head -n 1)
-
-          if [ -n "$IMAGE_NORMAL" ] && [ -n "$IMAGE_KSU" ] && [ -n "$DTB_FILE" ]; then
-            echo "Both normal and KSU images present. Creating Unified bsdiff zip..."
-            bsdiff "$IMAGE_NORMAL" "$IMAGE_KSU" ksu.bdf
-
-            UNIFIED_DIR="package_unified"
-            mkdir -p "$UNIFIED_DIR"
-            cp -r anykernel/* "$UNIFIED_DIR"/
-            cp "$IMAGE_NORMAL" "$UNIFIED_DIR"/Image
-            cp "$DTB_FILE" "$UNIFIED_DIR"/dtb
-            cp ksu.bdf "$UNIFIED_DIR"/ksu.bdf
-
-            chmod +x "$UNIFIED_DIR"/anykernel.sh \
-                     "$UNIFIED_DIR"/META-INF/com/google/android/update-binary \
-                     "$UNIFIED_DIR"/tools/* 2>/dev/null || true
-
-            UNIFIED_ZIP="HizduBoy-veux-${BUILD_DATE}-Unified.zip"
-            cd "$UNIFIED_DIR"
-            zip -r9 "../release_assets/${UNIFIED_ZIP}" * -x ".git*" "README.md"
-            cd ..
-
-            cd release_assets
-            sha256sum "${UNIFIED_ZIP}" > "${UNIFIED_ZIP}.sha256"
-            cd ..
-          fi
-
           echo "Final release assets:"
           ls -la release_assets/
           echo "TAG_NAME=v${BUILD_DATE}-${SHORT_SHA}" >> $GITHUB_ENV
@@ -291,19 +295,26 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.TAG_NAME }}
-          name: HizduBoy Kernel for POCO X4 Pro 5G (${{ env.TAG_NAME }})
+          name: Vector Kernel for POCO X4 Pro 5G (${{ env.TAG_NAME }})
           draft: false
           prerelease: false
           files: release_assets/*
           body: |
-            ## HizduBoy Kernel for POCO X4 Pro 5G (`veux` / `peux`)
+            ## Vector Kernel for POCO X4 Pro 5G (`veux` / `peux`)
             
             - **Commit:** `${{ github.sha }}`
             - **Branch:** `${{ github.ref_name }}`
-            - **Kernel Release:** `5.4.302~HizduBoy`
+            - **Kernel Release:** `5.4.302~Vector`
+            
+            ### Which one should I download?
+            - **Plus** builds contain every feature the normal builds have, plus some extra features that might not be suitable for normal users.
+            - **If you don't know what any of that means, download the non-plus build.**
             
             ### Included Packages:
-            - **`HizduBoy-veux-*-Standard.zip`**: Non-root clean kernel.
-            - **`HizduBoy-veux-*-KSU.zip`**: KernelSU root support pre-compiled into `Image`.
-            - **`HizduBoy-veux-*-Unified.zip`**: Dual-mode package using `ksu.bdf` delta patch (matches upstream release format).
-
+            **Normal (non-plus):**
+            - **`Vector-veux-*-Standard.zip`**: Non-root clean kernel.
+            - **`Vector-veux-*-KSU.zip`**: KernelSU root support pre-compiled into `Image`.
+            
+            **Plus (`vector_defconfig`):**
+            - **`Vector-veux-plus-*-Standard.zip`**: Non-root plus kernel.
+            - **`Vector-veux-plus-*-KSU.zip`**: Plus kernel with KernelSU pre-compiled into `Image`.

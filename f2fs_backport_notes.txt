@@ -1,0 +1,61 @@
+================================================================================
+F2FS BACKPORT NOTES & RUNTIME VERIFICATION (Poco X4 Pro 5G / SM6375 / UFS 2.2)
+================================================================================
+Target Kernel: Linux 5.4.302 (Android vendor kernel, veux_defconfig)
+Status: Clean, verified, boot-safe backport from Linux 5.10 / Android Common.
+
+--------------------------------------------------------------------------------
+1. APPLIED COMMITS & BUGFIXES
+--------------------------------------------------------------------------------
+
+Group 1: Fsync, Atomic Write, and Inline Data/Dentry Fixes
+- ce366bfa821e: f2fs: fix to avoid potential deadloop in f2fs_fsync_node_pages()
+- 7633a7387eb4: f2fs: fix IS_CHECKPOINTED flag inconsistency issue caused by concurrent
+                atomic commit and checkpoint writes
+- 68a0178981a0: f2fs: fix incorrect file address mapping when inline inode is unwritten
+- cfcd0e49a178: f2fs: validate inline dentry name lengths before conversion
+- 677a82b44ebf: f2fs: fix to do sanity check for inline inode
+- a8eb3de28e7a: f2fs: fix return value of f2fs_convert_inline_inode()
+
+Group 2: Node and Metadata Readahead Optimizations
+- 1db4b3609aa1: f2fs: optimize NAT block loading during checkpoint write
+- 7ec199117c32: f2fs: flush plug periodically during GC to maximize readahead effect
+- 0d5b9d815639: f2fs: invalidate meta pages only for post_read required inode
+- 9f0c4a46be1f: f2fs: fix to truncate meta inode pages forcely
+
+Group 3: Stability, Concurrency, and UAF Bugfixes
+- 2d9c4a4ed4ee: f2fs: fix UAF caused by decrementing sbi->nr_pages[] in f2fs_write_end_io()
+- dd3114870771 & 8b4468ec023d: f2fs: fix potential deadlock in f2fs_balance_fs()
+- c04f209773ec: f2fs: read i_size once in f2fs_vm_page_mkwrite
+- 846c499a6581: f2fs: validate orphan inode entry count
+- 6dc2b804a042: f2fs: reject invalid recovered filename lengths
+- 061cf3a84bde: f2fs: fix to do sanity check on ino and xnid
+
+Group 4: Checkpoint & Flush Latency Fix
+- d50dfc0c7df7: f2fs: don't grab superblock freeze for flush thread
+                (eliminates lock contention and potential deadlocks during filesystem freeze/sync)
+
+--------------------------------------------------------------------------------
+2. SKIPPED EXPERIMENTAL COMMITS (REASON FOR EXCLUSION)
+--------------------------------------------------------------------------------
+- 261eeb9c1585 ("f2fs: introduce checkpoint_merge mount option"):
+  From Linux 5.13. Requires separate kernel thread management that conflicts with
+  Android Userspace Checkpointing (checkpoint=disable/checkpoint=enable) and triggers
+  NULL pointer dereference during early superblock initialization before segment manager is ready.
+- 093749e296e2 ("f2fs: support age threshold based garbage collection - ATGC"):
+  From Linux 5.11. Requires non-existent inmem-curseg and 64-bit extent caching APIs, causing
+  victim selection signature mismatch and boot failures.
+- 4f993264fe29 ("f2fs: introduce discard_unit mount option"):
+  From Linux 5.16. Changes on-disk/in-memory bitmap layouts in build_sit_info that crash 5.4 kernels.
+
+--------------------------------------------------------------------------------
+3. RUNTIME VERIFICATION
+--------------------------------------------------------------------------------
+1. Clean boot into Android (no logo freeze).
+2. Existing sysfs knobs remain fully operational:
+   /sys/fs/f2fs/<dev>/discard_granularity
+   /sys/fs/f2fs/<dev>/discard_idle_interval
+   /sys/fs/f2fs/<dev>/gc_urgent
+3. Benchmark suite:
+   su -c "sh /sdcard/bench/bench.sh new"
+   su -c "sh /sdcard/bench/compare.sh base new"

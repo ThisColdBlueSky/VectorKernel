@@ -401,4 +401,19 @@ static inline void membarrier_mm_sync_core_before_usermode(struct mm_struct *mm)
 }
 #endif
 
+#ifdef CONFIG_LRU_GEN
+static inline void lru_gen_use_mm(struct mm_struct *mm)
+{
+	/* unlikely but not a bug when racing with lru_gen_migrate_mm() */
+	VM_WARN_ON(list_empty(&mm->lru_gen.list));
+
+	if (!(current->flags & PF_KTHREAD) && !nodes_full(mm->lru_gen.nodes))
+		nodes_setall(mm->lru_gen.nodes);
+}
+#else
+static inline void lru_gen_use_mm(struct mm_struct *mm)
+{
+}
+#endif
+
 #endif /* _LINUX_SCHED_MM_H */
