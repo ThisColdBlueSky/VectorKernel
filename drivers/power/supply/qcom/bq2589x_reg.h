@@ -1,6 +1,8 @@
 #ifndef __BQ2589X_HEADER__
 #define __BQ2589X_HEADER__
 
+#include <linux/types.h>
+
 /* Register 00h */
 #define BQ2589X_REG_00      		0x00
 #define BQ2589X_ENHIZ_MASK		    0x80
@@ -16,6 +18,22 @@
 #define BQ2589X_IINLIM_SHIFT		0
 #define BQ2589X_IINLIM_BASE         100
 #define BQ2589X_IINLIM_LSB          50
+#define BQ2589X_IINLIM_MAX          (BQ2589X_IINLIM_BASE + BQ2589X_IINLIM_MASK * BQ2589X_IINLIM_LSB) /* 3250 mA */
+
+static inline u8 bq2589x_iinlim_to_reg(int ma)
+{
+	if (ma < BQ2589X_IINLIM_BASE)
+		return 0x00;
+	if (ma > BQ2589X_IINLIM_MAX)
+		return BQ2589X_IINLIM_MASK;
+	return (u8)((ma - BQ2589X_IINLIM_BASE) / BQ2589X_IINLIM_LSB);
+}
+
+static inline int bq2589x_reg_to_iinlim(u8 reg)
+{
+	reg &= BQ2589X_IINLIM_MASK;
+	return BQ2589X_IINLIM_BASE + (int)reg * BQ2589X_IINLIM_LSB;
+}
 
 /* Register 01h */
 #define BQ2589X_REG_01		    	0x01

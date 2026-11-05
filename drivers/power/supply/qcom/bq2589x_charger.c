@@ -472,7 +472,7 @@ int bq2589x_set_input_current_limit(struct bq2589x *bq, int curr)
 {
 	u8 val;
 
-	val = (curr - BQ2589X_IINLIM_BASE) / BQ2589X_IINLIM_LSB;
+	val = bq2589x_iinlim_to_reg(curr);
 	return bq2589x_update_bits(bq, BQ2589X_REG_00, BQ2589X_IINLIM_MASK, val << BQ2589X_IINLIM_SHIFT);
 }
 
