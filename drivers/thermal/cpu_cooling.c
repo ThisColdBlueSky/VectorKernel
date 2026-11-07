@@ -89,6 +89,7 @@ struct cpufreq_cooling_device {
 	struct freq_table *freq_table;	/* In descending order */
 	struct cpufreq_policy *policy;
 	struct list_head node;
+	struct mutex lock;
 	struct time_in_idle *idle_time;
 	struct freq_qos_request qos_req;
 };
@@ -329,6 +330,8 @@ static int cpufreq_set_cur_state(struct thermal_cooling_device *cdev,
 	if (WARN_ON(state > cpufreq_cdev->max_level))
 		return -EINVAL;
 
+	mutex_lock(&cpufreq_cdev->lock);
+
 	/* Store daemon's requested state separately */
 	cpufreq_cdev->requested_state = state;
 
@@ -339,13 +342,17 @@ static int cpufreq_set_cur_state(struct thermal_cooling_device *cdev,
 	}
 
 	/* Check if the old cooling action is same as new cooling action */
-	if (cpufreq_cdev->cpufreq_state == state)
+	if (cpufreq_cdev->cpufreq_state == state) {
+		mutex_unlock(&cpufreq_cdev->lock);
 		return 0;
+	}
 
 	ret = freq_qos_update_request(&cpufreq_cdev->qos_req,
 			cpufreq_cdev->freq_table[state].frequency);
 	if (ret >= 0)
 		cpufreq_cdev->cpufreq_state = state;
+
+	mutex_unlock(&cpufreq_cdev->lock);
 
 	return ret;
 }
@@ -358,6 +365,7 @@ static void cpufreq_cooling_thermal_override_reapply(void)
 
 	mutex_lock(&cooling_list_lock);
 	list_for_each_entry(cpufreq_cdev, &cpufreq_cdev_list, node) {
+		mutex_lock(&cpufreq_cdev->lock);
 		state = cpufreq_cdev->requested_state;
 		if (vendor_thermal_cpu_override_active(&max_allowed_state, cpufreq_cdev->policy)) {
 			if (state > max_allowed_state)
@@ -369,6 +377,7 @@ static void cpufreq_cooling_thermal_override_reapply(void)
 			if (ret >= 0)
 				cpufreq_cdev->cpufreq_state = state;
 		}
+		mutex_unlock(&cpufreq_cdev->lock);
 	}
 	mutex_unlock(&cooling_list_lock);
 }
@@ -662,6 +671,8 @@ __cpufreq_cooling_register(struct device_node *np,
 		cdev = ERR_PTR(ret);
 		goto remove_ida;
 	}
+
+	mutex_init(&cpufreq_cdev->lock);
 
 	cdev = thermal_of_cooling_device_register(np, dev_name, cpufreq_cdev,
 						  cooling_ops);

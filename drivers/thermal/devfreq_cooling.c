@@ -62,6 +62,7 @@ struct devfreq_cooling_device {
 	unsigned long cooling_state;
 	unsigned long requested_state;
 	struct list_head node;
+	struct mutex lock;
 	u32 *power_table;
 	u32 *freq_table;
 	size_t freq_table_size;
@@ -143,6 +144,8 @@ static int devfreq_cooling_set_cur_state(struct thermal_cooling_device *cdev,
 	int ret;
 	unsigned long max_allowed_state;
 
+	mutex_lock(&dfc->lock);
+
 	/* Store daemon's requested state separately */
 	dfc->requested_state = state;
 
@@ -152,19 +155,26 @@ static int devfreq_cooling_set_cur_state(struct thermal_cooling_device *cdev,
 			state = min(max_allowed_state, (unsigned long)(dfc->freq_table_size - 1));
 	}
 
-	if (state == dfc->cooling_state)
+	if (state == dfc->cooling_state) {
+		mutex_unlock(&dfc->lock);
 		return 0;
+	}
 
 	dev_dbg(dev, "Setting cooling state %lu\n", state);
 
-	if (state >= dfc->freq_table_size)
+	if (state >= dfc->freq_table_size) {
+		mutex_unlock(&dfc->lock);
 		return -EINVAL;
+	}
 
 	ret = partition_enable_opps(dfc, state);
-	if (ret)
+	if (ret) {
+		mutex_unlock(&dfc->lock);
 		return ret;
+	}
 
 	dfc->cooling_state = state;
+	mutex_unlock(&dfc->lock);
 
 	return 0;
 }
@@ -177,6 +187,7 @@ static void devfreq_cooling_thermal_override_reapply(void)
 
 	mutex_lock(&dfc_list_lock);
 	list_for_each_entry(dfc, &dfc_cdev_list, node) {
+		mutex_lock(&dfc->lock);
 		state = dfc->requested_state;
 		if (vendor_thermal_gpu_override_active(&max_allowed_state)) {
 			if (state > max_allowed_state)
@@ -187,6 +198,7 @@ static void devfreq_cooling_thermal_override_reapply(void)
 			if (!ret)
 				dfc->cooling_state = state;
 		}
+		mutex_unlock(&dfc->lock);
 	}
 	mutex_unlock(&dfc_list_lock);
 }
@@ -553,6 +565,7 @@ of_devfreq_cooling_register_power(struct device_node *np, struct devfreq *df,
 		return ERR_PTR(-ENOMEM);
 
 	dfc->devfreq = df;
+	mutex_init(&dfc->lock);
 
 	if (dfc_power) {
 		dfc->power_ops = dfc_power;
