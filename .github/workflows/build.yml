@@ -32,6 +32,7 @@ on:
       - arm64-string-backport
       - bbrv3-backport
       - thermal-override
+      - thermal-override-2
     paths-ignore:
       - '**.md'
       - '.gitignore'
@@ -261,7 +262,8 @@ jobs:
       needs.build.result == 'success' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.create_release == true &&
-      github.ref_name != 'thermal-override'
+      github.ref_name != 'thermal-override' &&
+      github.ref_name != 'thermal-override-2'
 
     steps:
       - name: Checkout Source Code
