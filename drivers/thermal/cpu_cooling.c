@@ -367,6 +367,10 @@ static void cpufreq_cooling_thermal_override_reapply(void)
 	list_for_each_entry(cpufreq_cdev, &cpufreq_cdev_list, node) {
 		mutex_lock(&cpufreq_cdev->lock);
 		state = cpufreq_cdev->requested_state;
+		if (state > cpufreq_cdev->max_level) {
+			mutex_unlock(&cpufreq_cdev->lock);
+			continue;
+		}
 		if (vendor_thermal_cpu_override_active(&max_allowed_state, cpufreq_cdev->policy)) {
 			if (state > max_allowed_state)
 				state = min(max_allowed_state, (unsigned long)cpufreq_cdev->max_level);
