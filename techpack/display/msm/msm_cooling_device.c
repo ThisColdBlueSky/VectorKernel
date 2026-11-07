@@ -40,6 +40,8 @@ static int sde_cdev_set_cur_brightness(struct thermal_cooling_device *cdev,
 	unsigned long brightness_lvl = 0;
 	unsigned long effective_state;
 
+	mutex_lock(&disp_cdev->lock);
+
 	/* Store daemon's requested state separately */
 	disp_cdev->requested_state = state;
 
@@ -48,16 +50,21 @@ static int sde_cdev_set_cur_brightness(struct thermal_cooling_device *cdev,
 	else
 		effective_state = state;
 
-	if (effective_state > disp_cdev->bd->props.max_brightness / disp_cdev->cdev_sf)
+	if (effective_state > disp_cdev->bd->props.max_brightness / disp_cdev->cdev_sf) {
+		mutex_unlock(&disp_cdev->lock);
 		return -EINVAL;
+	}
 
 	brightness_lvl = disp_cdev->bd->props.max_brightness -
 				(effective_state * disp_cdev->cdev_sf);
-	if (brightness_lvl == disp_cdev->thermal_state)
+	if (brightness_lvl == disp_cdev->thermal_state) {
+		mutex_unlock(&disp_cdev->lock);
 		return 0;
+	}
 	disp_cdev->thermal_state = brightness_lvl;
 	blocking_notifier_call_chain(&disp_cdev->notifier_head,
 					brightness_lvl, (void *)disp_cdev->bd);
+	mutex_unlock(&disp_cdev->lock);
 
 	return 0;
 }
@@ -70,21 +77,22 @@ static void backlight_cdev_thermal_override_reapply(void)
 
 	mutex_lock(&sde_cdev_list_lock);
 	list_for_each_entry(disp_cdev, &sde_cdev_list, node) {
+		mutex_lock(&disp_cdev->lock);
 		if (vendor_thermal_backlight_override_active())
 			effective_state = 0;
 		else
 			effective_state = disp_cdev->requested_state;
 
-		if (effective_state > disp_cdev->bd->props.max_brightness / disp_cdev->cdev_sf)
-			continue;
-
-		brightness_lvl = disp_cdev->bd->props.max_brightness -
-					(effective_state * disp_cdev->cdev_sf);
-		if (brightness_lvl != disp_cdev->thermal_state) {
-			disp_cdev->thermal_state = brightness_lvl;
-			blocking_notifier_call_chain(&disp_cdev->notifier_head,
-					brightness_lvl, (void *)disp_cdev->bd);
+		if (effective_state <= disp_cdev->bd->props.max_brightness / disp_cdev->cdev_sf) {
+			brightness_lvl = disp_cdev->bd->props.max_brightness -
+						(effective_state * disp_cdev->cdev_sf);
+			if (brightness_lvl != disp_cdev->thermal_state) {
+				disp_cdev->thermal_state = brightness_lvl;
+				blocking_notifier_call_chain(&disp_cdev->notifier_head,
+						brightness_lvl, (void *)disp_cdev->bd);
+			}
 		}
+		mutex_unlock(&disp_cdev->lock);
 	}
 	mutex_unlock(&sde_cdev_list_lock);
 }
@@ -109,6 +117,7 @@ struct sde_cdev *backlight_cdev_register(struct device *dev,
 	disp_cdev = devm_kzalloc(dev, sizeof(*disp_cdev), GFP_KERNEL);
 	if (!disp_cdev)
 		return ERR_PTR(-ENOMEM);
+	mutex_init(&disp_cdev->lock);
 	disp_cdev->thermal_state = 0;
 	disp_cdev->bd = bd;
 

@@ -18,6 +18,7 @@ struct sde_cdev {
 	unsigned long thermal_state;
 	unsigned long requested_state;
 	struct list_head node;
+	struct mutex lock;
 	unsigned int cdev_sf;
 };
 
