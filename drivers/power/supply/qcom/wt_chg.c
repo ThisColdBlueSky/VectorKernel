@@ -830,9 +830,8 @@ static unsigned int battery_clear_decic = 420;
 static DEFINE_SPINLOCK(guard_lock);
 static bool guard_battery_enforced;
 static bool guard_skin_enforced;
-static int cached_bms_temp;
-static int cached_skin_temp;
 static bool cached_override_safe = false;
+static bool thermal_override_initialized = false;
 
 static struct thermal_zone_device *skin_tz;
 static struct delayed_work thermal_override_poll_work;
@@ -843,12 +842,12 @@ static void (*gpu_reapply_cb)(void);
 static void (*backlight_reapply_cb)(void);
 static DEFINE_MUTEX(reapply_cb_lock);
 
-static inline bool any_vendor_override_enabled(void)
+static inline bool thermal_override_poll_needed(void)
 {
-	return READ_ONCE(ignore_vendor_thermal) ||
-	       READ_ONCE(ignore_vendor_cpu_thermal) ||
+	return READ_ONCE(ignore_vendor_cpu_thermal) ||
 	       READ_ONCE(ignore_vendor_gpu_thermal) ||
-	       READ_ONCE(ignore_vendor_backlight_thermal);
+	       READ_ONCE(ignore_vendor_backlight_thermal) ||
+	       (READ_ONCE(skin_override_max_mc) > 0);
 }
 
 static void thermal_override_reapply_work_fn(struct work_struct *work)
@@ -873,6 +872,9 @@ static void thermal_override_reapply_work_fn(struct work_struct *work)
 
 void vendor_thermal_reapply(void)
 {
+	if (!smp_load_acquire(&thermal_override_initialized))
+		return;
+
 	schedule_work(&thermal_override_reapply_work);
 }
 EXPORT_SYMBOL_GPL(vendor_thermal_reapply);
@@ -882,14 +884,16 @@ static void set_ignore_vendor_thermal_val(int val)
 	WRITE_ONCE(ignore_vendor_thermal, !!val);
 	pr_info("wt_chg: ignore_vendor_thermal set to %d\n", !!val);
 
-	if (any_vendor_override_enabled())
-		schedule_delayed_work(&thermal_override_poll_work, 0);
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
 
-	vendor_thermal_reapply();
+		vendor_thermal_reapply();
 
-	if (g_batt_chg) {
-		cancel_delayed_work(&g_batt_chg->batt_chg_work);
-		schedule_delayed_work(&g_batt_chg->batt_chg_work, 0);
+		if (g_batt_chg) {
+			cancel_delayed_work(&g_batt_chg->batt_chg_work);
+			schedule_delayed_work(&g_batt_chg->batt_chg_work, 0);
+		}
 	}
 }
 
@@ -922,7 +926,7 @@ static void set_vendor_thermal_max_level_val(int val)
 	WRITE_ONCE(vendor_thermal_max_level, val);
 	pr_info("wt_chg: vendor_thermal_max_level set to %d\n", val);
 
-	if (g_batt_chg) {
+	if (smp_load_acquire(&thermal_override_initialized) && g_batt_chg) {
 		cancel_delayed_work(&g_batt_chg->batt_chg_work);
 		schedule_delayed_work(&g_batt_chg->batt_chg_work, 0);
 	}
@@ -952,10 +956,12 @@ static void set_ignore_vendor_cpu_thermal_val(int val)
 	WRITE_ONCE(ignore_vendor_cpu_thermal, !!val);
 	pr_info("wt_chg: ignore_vendor_cpu_thermal set to %d\n", !!val);
 
-	if (any_vendor_override_enabled())
-		schedule_delayed_work(&thermal_override_poll_work, 0);
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
 
-	vendor_thermal_reapply();
+		vendor_thermal_reapply();
+	}
 }
 
 static int param_set_ignore_vendor_cpu_thermal(const char *val, const struct kernel_param *kp)
@@ -981,7 +987,9 @@ static void set_cpu_little_override_max_state_val(unsigned int val)
 {
 	WRITE_ONCE(cpu_little_override_max_state, val);
 	pr_info("wt_chg: cpu_little_override_max_state set to %u\n", val);
-	vendor_thermal_reapply();
+
+	if (smp_load_acquire(&thermal_override_initialized))
+		vendor_thermal_reapply();
 }
 
 static int param_set_cpu_little_override_max_state(const char *val, const struct kernel_param *kp)
@@ -1008,7 +1016,9 @@ static void set_cpu_big_override_max_state_val(unsigned int val)
 {
 	WRITE_ONCE(cpu_big_override_max_state, val);
 	pr_info("wt_chg: cpu_big_override_max_state set to %u\n", val);
-	vendor_thermal_reapply();
+
+	if (smp_load_acquire(&thermal_override_initialized))
+		vendor_thermal_reapply();
 }
 
 static int param_set_cpu_big_override_max_state(const char *val, const struct kernel_param *kp)
@@ -1036,10 +1046,12 @@ static void set_ignore_vendor_gpu_thermal_val(int val)
 	WRITE_ONCE(ignore_vendor_gpu_thermal, !!val);
 	pr_info("wt_chg: ignore_vendor_gpu_thermal set to %d\n", !!val);
 
-	if (any_vendor_override_enabled())
-		schedule_delayed_work(&thermal_override_poll_work, 0);
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
 
-	vendor_thermal_reapply();
+		vendor_thermal_reapply();
+	}
 }
 
 static int param_set_ignore_vendor_gpu_thermal(const char *val, const struct kernel_param *kp)
@@ -1065,7 +1077,9 @@ static void set_gpu_override_max_state_val(unsigned int val)
 {
 	WRITE_ONCE(gpu_override_max_state, val);
 	pr_info("wt_chg: gpu_override_max_state set to %u\n", val);
-	vendor_thermal_reapply();
+
+	if (smp_load_acquire(&thermal_override_initialized))
+		vendor_thermal_reapply();
 }
 
 static int param_set_gpu_override_max_state(const char *val, const struct kernel_param *kp)
@@ -1093,10 +1107,12 @@ static void set_ignore_vendor_backlight_thermal_val(int val)
 	WRITE_ONCE(ignore_vendor_backlight_thermal, !!val);
 	pr_info("wt_chg: ignore_vendor_backlight_thermal set to %d\n", !!val);
 
-	if (any_vendor_override_enabled())
-		schedule_delayed_work(&thermal_override_poll_work, 0);
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
 
-	vendor_thermal_reapply();
+		vendor_thermal_reapply();
+	}
 }
 
 static int param_set_ignore_vendor_backlight_thermal(const char *val, const struct kernel_param *kp)
@@ -1128,10 +1144,12 @@ static void set_skin_override_max_mc_val(int val)
 	WRITE_ONCE(skin_override_max_mc, val);
 	pr_info("wt_chg: skin_override_max_mc set to %d\n", val);
 
-	if (any_vendor_override_enabled())
-		schedule_delayed_work(&thermal_override_poll_work, 0);
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
 
-	vendor_thermal_reapply();
+		vendor_thermal_reapply();
+	}
 }
 
 static int param_set_skin_override_max_mc(const char *val, const struct kernel_param *kp)
@@ -1163,10 +1181,12 @@ static void set_battery_trip_decic_val(unsigned int val)
 	pr_info("wt_chg: battery_trip_decic set to %u (clear: %u)\n",
 		val, READ_ONCE(battery_clear_decic));
 
-	if (any_vendor_override_enabled())
-		schedule_delayed_work(&thermal_override_poll_work, 0);
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
 
-	vendor_thermal_reapply();
+		vendor_thermal_reapply();
+	}
 }
 
 static int param_set_battery_trip_decic(const char *val, const struct kernel_param *kp)
@@ -1200,10 +1220,12 @@ static void set_battery_clear_decic_val(unsigned int val)
 	pr_info("wt_chg: battery_clear_decic set to %u (trip: %u)\n",
 		val, trip);
 
-	if (any_vendor_override_enabled())
-		schedule_delayed_work(&thermal_override_poll_work, 0);
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
 
-	vendor_thermal_reapply();
+		vendor_thermal_reapply();
+	}
 }
 
 static int param_set_battery_clear_decic(const char *val, const struct kernel_param *kp)
@@ -1285,6 +1307,9 @@ static void thermal_override_poll_work_fn(struct work_struct *work)
 	unsigned long flags;
 	unsigned int trip, clear;
 
+	if (!smp_load_acquire(&thermal_override_initialized))
+		return;
+
 	if (!chg)
 		goto rearm;
 
@@ -1314,7 +1339,6 @@ static void thermal_override_poll_work_fn(struct work_struct *work)
 	clear = READ_ONCE(battery_clear_decic);
 
 	if (bms_read_ok) {
-		cached_bms_temp = bms_temp;
 		/* Battery hysteresis: trip >= trip, release < clear */
 		if (!chg->thermal_throttle_active) {
 			if (bms_temp >= (int)trip)
@@ -1340,7 +1364,6 @@ static void thermal_override_poll_work_fn(struct work_struct *work)
 		int release = thresh - 2000;
 
 		if (skin_read_ok) {
-			cached_skin_temp = skin_temp;
 			if (!guard_skin_enforced) {
 				if (skin_temp >= thresh)
 					guard_skin_enforced = true;
@@ -1367,7 +1390,7 @@ static void thermal_override_poll_work_fn(struct work_struct *work)
 		vendor_thermal_reapply();
 
 rearm:
-	if (any_vendor_override_enabled())
+	if (smp_load_acquire(&thermal_override_initialized) && thermal_override_poll_needed())
 		schedule_delayed_work(&thermal_override_poll_work, msecs_to_jiffies(2000));
 }
 
@@ -1381,7 +1404,7 @@ static bool thermal_throttle_enforced(struct batt_chg *chg)
 	bool state_changed = false;
 	unsigned int trip, clear;
 
-	if (!chg)
+	if (!chg || !smp_load_acquire(&thermal_override_initialized))
 		return true;
 
 	/* If disabled at runtime, behave 100% like stock (enforce throttle) */
@@ -1403,8 +1426,6 @@ static bool thermal_throttle_enforced(struct batt_chg *chg)
 		guard_battery_enforced = true;
 		enforced = true;
 	} else {
-		cached_bms_temp = bms_temp;
-
 		/*
 		 * Temperature hysteresis guardrail:
 		 * Start enforcing thermal request at >= trip (default 450 = 45.0C).
@@ -1444,6 +1465,9 @@ bool vendor_thermal_override_safe(void)
 {
 	unsigned long flags;
 	bool safe;
+
+	if (!smp_load_acquire(&thermal_override_initialized))
+		return false;
 
 	if (!READ_ONCE(ignore_vendor_thermal))
 		return false;
@@ -4643,7 +4667,8 @@ static int batt_chg_probe(struct platform_device *pdev)
 
 	INIT_DELAYED_WORK(&thermal_override_poll_work, thermal_override_poll_work_fn);
 	INIT_WORK(&thermal_override_reapply_work, thermal_override_reapply_work_fn);
-	if (any_vendor_override_enabled())
+	smp_store_release(&thermal_override_initialized, true);
+	if (thermal_override_poll_needed())
 		schedule_delayed_work(&thermal_override_poll_work, 0);
 
 	rc = batt_init_iio_psy(batt_chg);
@@ -4717,6 +4742,7 @@ static int batt_chg_probe(struct platform_device *pdev)
 	return 0;
 
 cleanup:
+	smp_store_release(&thermal_override_initialized, false);
 	cancel_delayed_work_sync(&thermal_override_poll_work);
 	cancel_work_sync(&thermal_override_reapply_work);
 	pr_err("batt_chg probe fail\n");
@@ -4725,6 +4751,7 @@ cleanup:
 
 static int batt_chg_remove(struct platform_device *pdev)
 {
+	smp_store_release(&thermal_override_initialized, false);
 	cancel_delayed_work_sync(&thermal_override_poll_work);
 	cancel_work_sync(&thermal_override_reapply_work);
 	return 0;
@@ -4735,6 +4762,7 @@ static void batt_chg_shutdown(struct platform_device *pdev)
 	struct batt_chg *chg = platform_get_drvdata(pdev);
 
 	pr_err("%s batt_chg_shutdown\n", __func__);
+	smp_store_release(&thermal_override_initialized, false);
 	cancel_delayed_work_sync(&thermal_override_poll_work);
 	cancel_work_sync(&thermal_override_reapply_work);
 	if (!chg)

@@ -40,6 +40,9 @@ static int sde_cdev_set_cur_brightness(struct thermal_cooling_device *cdev,
 	unsigned long brightness_lvl = 0;
 	unsigned long effective_state;
 
+	if (state > disp_cdev->bd->props.max_brightness / disp_cdev->cdev_sf)
+		return -EINVAL;
+
 	mutex_lock(&disp_cdev->lock);
 
 	/* Store daemon's requested state separately */
@@ -49,11 +52,6 @@ static int sde_cdev_set_cur_brightness(struct thermal_cooling_device *cdev,
 		effective_state = 0;
 	else
 		effective_state = state;
-
-	if (effective_state > disp_cdev->bd->props.max_brightness / disp_cdev->cdev_sf) {
-		mutex_unlock(&disp_cdev->lock);
-		return -EINVAL;
-	}
 
 	brightness_lvl = disp_cdev->bd->props.max_brightness -
 				(effective_state * disp_cdev->cdev_sf);
@@ -78,6 +76,11 @@ static void backlight_cdev_thermal_override_reapply(void)
 	mutex_lock(&sde_cdev_list_lock);
 	list_for_each_entry(disp_cdev, &sde_cdev_list, node) {
 		mutex_lock(&disp_cdev->lock);
+		if (disp_cdev->requested_state > disp_cdev->bd->props.max_brightness / disp_cdev->cdev_sf) {
+			mutex_unlock(&disp_cdev->lock);
+			continue;
+		}
+
 		if (vendor_thermal_backlight_override_active())
 			effective_state = 0;
 		else
