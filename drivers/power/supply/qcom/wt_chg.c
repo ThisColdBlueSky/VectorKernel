@@ -443,6 +443,8 @@ struct batt_chg {
 	struct mutex bypass_lock;
 	int usb_icl_override_ma;
 	struct mutex icl_lock;
+	bool thermal_throttle_active;
+	bool vbat_throttle_active;
 };
 
 struct batt_chg *g_batt_chg;
@@ -795,6 +797,86 @@ int get_prop_batt_health(struct batt_chg *chg, union power_supply_propval *val)
 	return 0;
 }
 
+/*
+ * Runtime switches for vendor thermal throttle control:
+ * ignore_vendor_thermal:
+ *   1 = ignore vendor thermal daemon throttle when battery & voltage are safe (default)
+ *   0 = stock behavior (always enforce vendor thermal throttle)
+ * vendor_thermal_max_level:
+ *   Max effective thermal mitigation level allowed when battery is safe (default: 18 = 3500mA)
+ */
+static int ignore_vendor_thermal = 1;
+module_param_named(ignore_vendor_thermal, ignore_vendor_thermal, int, 0644);
+MODULE_PARM_DESC(ignore_vendor_thermal, "Ignore vendor thermal daemon throttle when battery is cool (<45C)");
+
+static int vendor_thermal_max_level = 18;
+module_param_named(vendor_thermal_max_level, vendor_thermal_max_level, int, 0644);
+MODULE_PARM_DESC(vendor_thermal_max_level, "Max allowed vendor thermal throttling level when battery is safe (default: 18)");
+
+static bool thermal_throttle_enforced(struct batt_chg *chg)
+{
+	int bms_temp = 0;
+	int vbat_uv = 0;
+	int rc = 0;
+
+	if (!chg)
+		return true;
+
+	/* If disabled at runtime, behave 100% like stock (enforce throttle) */
+	if (!READ_ONCE(ignore_vendor_thermal))
+		return true;
+
+	/* Read true battery temperature from BMS fuel gauge in decidegC */
+	rc = batt_get_iio_channel(chg, BMS, BATT_QG_TEMP, &bms_temp);
+	if (rc < 0) {
+		/* Fail-safe: if BMS temperature read fails, immediately enforce thermal limit */
+		chg->thermal_throttle_active = true;
+		return true;
+	}
+
+	/*
+	 * Temperature hysteresis guardrail:
+	 * Start enforcing thermal request at >= 450 (45.0C).
+	 * Resume overriding thermal request only when cooled below 420 (42.0C).
+	 */
+	if (!chg->thermal_throttle_active) {
+		if (bms_temp >= 450)
+			chg->thermal_throttle_active = true;
+	} else {
+		if (bms_temp < 420)
+			chg->thermal_throttle_active = false;
+	}
+
+	if (chg->thermal_throttle_active)
+		return true;
+
+	/*
+	 * Voltage hysteresis guardrail:
+	 * Enforce thermal request at >= 4400000 uV (4.4V).
+	 * Stop enforcing below 4380000 uV (4.38V).
+	 */
+	rc = batt_get_iio_channel(chg, BMS, BATT_QG_VOLTAGE_NOW, &vbat_uv);
+	if (rc < 0)
+		vbat_uv = chg->cell_voltage;
+
+	if (!chg->vbat_throttle_active) {
+		if (vbat_uv >= 4400000)
+			chg->vbat_throttle_active = true;
+	} else {
+		if (vbat_uv < 4380000)
+			chg->vbat_throttle_active = false;
+	}
+
+	if (chg->vbat_throttle_active)
+		return true;
+
+	/* Also enforce thermal request if JEITA hot state is active (>= 48.0C or high_temp_flag) */
+	if (bms_temp >= chg->dt.jeita_temp_step5 || chg->high_temp_flag)
+		return true;
+
+	return false;
+}
+
 static int sw_battery_set_cv(struct batt_chg *chg)
 {
 	int cv = 0;
@@ -817,7 +899,8 @@ static int sw_battery_set_cv(struct batt_chg *chg)
 	if (cur_now < 0)
 		cur = 0 - (cur_now / 1000);
 	chg->batt_id = batt_id;
-	if (chg->batt_auth && chg->pd_auth && (chg->system_temp_level != 24)) {
+	if (chg->batt_auth && chg->pd_auth &&
+	    (!thermal_throttle_enforced(chg) || chg->system_temp_level != 24)) {
 		if (temp >= 150 && temp < 350 && batt_id) {
 			charger_term = 896;
 			if(cur < charger_term - 40)
@@ -1180,8 +1263,16 @@ static int sw_battery_jeita(struct batt_chg *chg)
 		if (get_boot_mode()) {
 			them_curr = power_off_charge_them(chg, temp);
 			cur = 12050;
-		} else
-			them_curr = thermal_mitigation[chg->system_temp_level] / 1000;
+		} else {
+			int lvl;
+			if (thermal_throttle_enforced(chg)) {
+				lvl = chg->system_temp_level;
+			} else {
+				int max_lvl = clamp(READ_ONCE(vendor_thermal_max_level), 0, chg->thermal_levels);
+				lvl = min(chg->system_temp_level, max_lvl);
+			}
+			them_curr = thermal_mitigation[lvl] / 1000;
+		}
 		cur = min(cur, them_curr);
 		batt_set_iio_channel(chg, BMS, BATT_QG_FCC_MAX, cur);
 		if (chg->is_pps_on && !chg->fastcharge_mode && chg->pd_auth) {
@@ -1189,10 +1280,18 @@ static int sw_battery_jeita(struct batt_chg *chg)
 			chg->fastcharge_mode = 1;
 		}
 	} else {
-		if (get_boot_mode())
+		if (get_boot_mode()) {
 			them_curr = power_off_charge_them(chg, temp);
-		else
-			them_curr = thermal_mitigation[chg->system_temp_level] / 1000;
+		} else {
+			int lvl;
+			if (thermal_throttle_enforced(chg)) {
+				lvl = chg->system_temp_level;
+			} else {
+				int max_lvl = clamp(READ_ONCE(vendor_thermal_max_level), 0, chg->thermal_levels);
+				lvl = min(chg->system_temp_level, max_lvl);
+			}
+			them_curr = thermal_mitigation[lvl] / 1000;
+		}
 		cur = min(cur, them_curr);
 		batt_set_iio_channel(chg, BMS, BATT_QG_FCC_MAX, cur);
 	}
@@ -1957,6 +2056,8 @@ static int batt_init_config(struct batt_chg *chg)
 	chg->charge_voltage_max = 4450000;
 	chg->charge_design_voltage_max = 11000000;
 	chg->system_temp_level = 0;
+	chg->thermal_throttle_active = false;
+	chg->vbat_throttle_active = false;
 	chg->batt_iterm = 250;
 	chg->thermal_levels = 24;
 	chg->shutdown_flag = false;
@@ -3023,6 +3124,79 @@ static struct class_attribute class_attr_usb_icl_override_ma = {
 	.store = usb_icl_override_ma_store,
 };
 
+static ssize_t ignore_vendor_thermal_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(ignore_vendor_thermal));
+}
+
+static ssize_t ignore_vendor_thermal_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	WRITE_ONCE(ignore_vendor_thermal, !!val);
+	pr_info("wt_chg: ignore_vendor_thermal set to %d\n", !!val);
+
+	if (g_batt_chg) {
+		cancel_delayed_work(&g_batt_chg->batt_chg_work);
+		schedule_delayed_work(&g_batt_chg->batt_chg_work, 0);
+	}
+
+	return count;
+}
+static struct class_attribute class_attr_ignore_vendor_thermal = {
+	.attr = {
+		.name = "ignore_vendor_thermal",
+		.mode = 0644,
+	},
+	.show = ignore_vendor_thermal_show,
+	.store = ignore_vendor_thermal_store,
+};
+
+static ssize_t vendor_thermal_max_level_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(vendor_thermal_max_level));
+}
+
+static ssize_t vendor_thermal_max_level_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	if (val < 0)
+		val = 0;
+	else if (val > 24)
+		val = 24;
+
+	WRITE_ONCE(vendor_thermal_max_level, val);
+	pr_info("wt_chg: vendor_thermal_max_level set to %d\n", val);
+
+	if (g_batt_chg) {
+		cancel_delayed_work(&g_batt_chg->batt_chg_work);
+		schedule_delayed_work(&g_batt_chg->batt_chg_work, 0);
+	}
+
+	return count;
+}
+static struct class_attribute class_attr_vendor_thermal_max_level = {
+	.attr = {
+		.name = "vendor_thermal_max_level",
+		.mode = 0644,
+	},
+	.show = vendor_thermal_max_level_show,
+	.store = vendor_thermal_max_level_store,
+};
+
 static struct attribute *battery_class_attrs[] = {
 	&class_attr_soc_decimal.attr,
 	&class_attr_shutdown_delay.attr,
@@ -3061,6 +3235,8 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_connector_temp.attr,
 	&class_attr_bypass_charger.attr,
 	&class_attr_usb_icl_override_ma.attr,
+	&class_attr_ignore_vendor_thermal.attr,
+	&class_attr_vendor_thermal_max_level.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(battery_class);
