@@ -25,6 +25,7 @@
 #include <linux/slab.h>
 #include <linux/pm_opp.h>
 #include <linux/thermal.h>
+#include <linux/thermal_override.h>
 
 #include <trace/events/thermal.h>
 
@@ -59,6 +60,8 @@ struct devfreq_cooling_device {
 	struct thermal_cooling_device *cdev;
 	struct devfreq *devfreq;
 	unsigned long cooling_state;
+	unsigned long requested_state;
+	struct list_head node;
 	u32 *power_table;
 	u32 *freq_table;
 	size_t freq_table_size;
@@ -66,6 +69,9 @@ struct devfreq_cooling_device {
 	u32 res_util;
 	int capped_state;
 };
+
+static DEFINE_MUTEX(dfc_list_lock);
+static LIST_HEAD(dfc_cdev_list);
 
 /**
  * partition_enable_opps() - disable all opps above a given state
@@ -135,6 +141,16 @@ static int devfreq_cooling_set_cur_state(struct thermal_cooling_device *cdev,
 	struct devfreq *df = dfc->devfreq;
 	struct device *dev = df->dev.parent;
 	int ret;
+	unsigned long max_allowed_state;
+
+	/* Store daemon's requested state separately */
+	dfc->requested_state = state;
+
+	/* Apply clamp or 0 when override active, else requested state */
+	if (vendor_thermal_gpu_override_active(&max_allowed_state)) {
+		if (state > max_allowed_state)
+			state = min(max_allowed_state, (unsigned long)(dfc->freq_table_size - 1));
+	}
 
 	if (state == dfc->cooling_state)
 		return 0;
@@ -151,6 +167,28 @@ static int devfreq_cooling_set_cur_state(struct thermal_cooling_device *cdev,
 	dfc->cooling_state = state;
 
 	return 0;
+}
+
+static void devfreq_cooling_thermal_override_reapply(void)
+{
+	struct devfreq_cooling_device *dfc;
+	unsigned long max_allowed_state;
+	unsigned long state;
+
+	mutex_lock(&dfc_list_lock);
+	list_for_each_entry(dfc, &dfc_cdev_list, node) {
+		state = dfc->requested_state;
+		if (vendor_thermal_gpu_override_active(&max_allowed_state)) {
+			if (state > max_allowed_state)
+				state = min(max_allowed_state, (unsigned long)(dfc->freq_table_size - 1));
+		}
+		if (dfc->cooling_state != state) {
+			int ret = partition_enable_opps(dfc, state);
+			if (!ret)
+				dfc->cooling_state = state;
+		}
+	}
+	mutex_unlock(&dfc_list_lock);
 }
 
 /**
@@ -548,6 +586,12 @@ of_devfreq_cooling_register_power(struct device_node *np, struct devfreq *df,
 
 	dfc->cdev = cdev;
 
+	mutex_lock(&dfc_list_lock);
+	if (list_empty(&dfc_cdev_list))
+		vendor_thermal_register_gpu_reapply(devfreq_cooling_thermal_override_reapply);
+	list_add(&dfc->node, &dfc_cdev_list);
+	mutex_unlock(&dfc_list_lock);
+
 	return cdev;
 
 release_ida:
@@ -597,6 +641,12 @@ void devfreq_cooling_unregister(struct thermal_cooling_device *cdev)
 		return;
 
 	dfc = cdev->devdata;
+
+	mutex_lock(&dfc_list_lock);
+	list_del(&dfc->node);
+	if (list_empty(&dfc_cdev_list))
+		vendor_thermal_unregister_gpu_reapply();
+	mutex_unlock(&dfc_list_lock);
 
 	thermal_cooling_device_unregister(dfc->cdev);
 	ida_simple_remove(&devfreq_ida, dfc->id);
