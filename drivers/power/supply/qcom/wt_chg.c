@@ -444,7 +444,6 @@ struct batt_chg {
 	int usb_icl_override_ma;
 	struct mutex icl_lock;
 	bool thermal_throttle_active;
-	bool vbat_throttle_active;
 };
 
 struct batt_chg *g_batt_chg;
@@ -816,7 +815,6 @@ MODULE_PARM_DESC(vendor_thermal_max_level, "Max allowed vendor thermal throttlin
 static bool thermal_throttle_enforced(struct batt_chg *chg)
 {
 	int bms_temp = 0;
-	int vbat_uv = 0;
 	int rc = 0;
 
 	if (!chg)
@@ -848,26 +846,6 @@ static bool thermal_throttle_enforced(struct batt_chg *chg)
 	}
 
 	if (chg->thermal_throttle_active)
-		return true;
-
-	/*
-	 * Voltage hysteresis guardrail:
-	 * Enforce thermal request at >= 4400000 uV (4.4V).
-	 * Stop enforcing below 4380000 uV (4.38V).
-	 */
-	rc = batt_get_iio_channel(chg, BMS, BATT_QG_VOLTAGE_NOW, &vbat_uv);
-	if (rc < 0)
-		vbat_uv = chg->cell_voltage;
-
-	if (!chg->vbat_throttle_active) {
-		if (vbat_uv >= 4400000)
-			chg->vbat_throttle_active = true;
-	} else {
-		if (vbat_uv < 4380000)
-			chg->vbat_throttle_active = false;
-	}
-
-	if (chg->vbat_throttle_active)
 		return true;
 
 	/* Also enforce thermal request if JEITA hot state is active (>= 48.0C or high_temp_flag) */
@@ -2057,7 +2035,6 @@ static int batt_init_config(struct batt_chg *chg)
 	chg->charge_design_voltage_max = 11000000;
 	chg->system_temp_level = 0;
 	chg->thermal_throttle_active = false;
-	chg->vbat_throttle_active = false;
 	chg->batt_iterm = 250;
 	chg->thermal_levels = 24;
 	chg->shutdown_flag = false;
