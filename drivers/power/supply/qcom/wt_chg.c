@@ -843,6 +843,10 @@ static unsigned int gpu_override_max_state = 0;
 module_param_named(gpu_override_max_state, gpu_override_max_state, uint, 0644);
 MODULE_PARM_DESC(gpu_override_max_state, "Max cooling state floor for GPU when override active (default: 0 -> no cap / 840MHz)");
 
+static int ignore_vendor_backlight_thermal = 0;
+module_param_named(ignore_vendor_backlight_thermal, ignore_vendor_backlight_thermal, int, 0644);
+MODULE_PARM_DESC(ignore_vendor_backlight_thermal, "Ignore vendor thermal backlight dimming when safe (removes backlight caps; skin backstop disabled by default)");
+
 static int skin_override_max_mc = 0;
 module_param_named(skin_override_max_mc, skin_override_max_mc, int, 0644);
 MODULE_PARM_DESC(skin_override_max_mc, "Chassis skin temp backstop in millidegC (0 = disabled by default; clamp 45000-60000 with 2000mC hysteresis)");
@@ -867,7 +871,8 @@ static inline bool any_vendor_override_enabled(void)
 {
 	return READ_ONCE(ignore_vendor_thermal) ||
 	       READ_ONCE(ignore_vendor_cpu_thermal) ||
-	       READ_ONCE(ignore_vendor_gpu_thermal);
+	       READ_ONCE(ignore_vendor_gpu_thermal) ||
+	       READ_ONCE(ignore_vendor_backlight_thermal);
 }
 
 static void thermal_override_reapply_work_fn(struct work_struct *work)
@@ -927,6 +932,22 @@ void vendor_thermal_unregister_gpu_reapply(void)
 	mutex_unlock(&reapply_cb_lock);
 }
 EXPORT_SYMBOL_GPL(vendor_thermal_unregister_gpu_reapply);
+
+void vendor_thermal_register_backlight_reapply(void (*fn)(void))
+{
+	mutex_lock(&reapply_cb_lock);
+	backlight_reapply_cb = fn;
+	mutex_unlock(&reapply_cb_lock);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_register_backlight_reapply);
+
+void vendor_thermal_unregister_backlight_reapply(void)
+{
+	mutex_lock(&reapply_cb_lock);
+	backlight_reapply_cb = NULL;
+	mutex_unlock(&reapply_cb_lock);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_unregister_backlight_reapply);
 
 static void thermal_override_poll_work_fn(struct work_struct *work)
 {
@@ -1140,6 +1161,15 @@ bool vendor_thermal_gpu_override_active(unsigned long *max_state)
 	return true;
 }
 EXPORT_SYMBOL_GPL(vendor_thermal_gpu_override_active);
+
+bool vendor_thermal_backlight_override_active(void)
+{
+	if (!READ_ONCE(ignore_vendor_backlight_thermal))
+		return false;
+
+	return vendor_thermal_override_safe();
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_backlight_override_active);
 
 static int sw_battery_set_cv(struct batt_chg *chg)
 {
@@ -3656,6 +3686,39 @@ static struct class_attribute class_attr_gpu_override_max_state = {
 	.store = gpu_override_max_state_store,
 };
 
+static ssize_t ignore_vendor_backlight_thermal_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(ignore_vendor_backlight_thermal));
+}
+
+static ssize_t ignore_vendor_backlight_thermal_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	WRITE_ONCE(ignore_vendor_backlight_thermal, !!val);
+	pr_info("wt_chg: ignore_vendor_backlight_thermal set to %d\n", !!val);
+
+	if (any_vendor_override_enabled())
+		schedule_delayed_work(&thermal_override_poll_work, 0);
+
+	vendor_thermal_reapply();
+	return count;
+}
+static struct class_attribute class_attr_ignore_vendor_backlight_thermal = {
+	.attr = {
+		.name = "ignore_vendor_backlight_thermal",
+		.mode = 0644,
+	},
+	.show = ignore_vendor_backlight_thermal_show,
+	.store = ignore_vendor_backlight_thermal_store,
+};
+
 static struct attribute *battery_class_attrs[] = {
 	&class_attr_soc_decimal.attr,
 	&class_attr_shutdown_delay.attr,
@@ -3702,6 +3765,7 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_skin_override_max_mc.attr,
 	&class_attr_ignore_vendor_gpu_thermal.attr,
 	&class_attr_gpu_override_max_state.attr,
+	&class_attr_ignore_vendor_backlight_thermal.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(battery_class);
