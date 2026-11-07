@@ -31,6 +31,7 @@ on:
       - main
       - arm64-string-backport
       - bbrv3-backport
+      - thermal-override
     paths-ignore:
       - '**.md'
       - '.gitignore'
@@ -238,7 +239,7 @@ jobs:
         if: steps.check_variant.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Vector-veux-${{ matrix.edition }}-${{ matrix.variant }}
+          name: Vector-veux-${{ github.ref_name }}-${{ matrix.edition }}-${{ matrix.variant }}
           path: build_output/*
           retention-days: 7
 
@@ -246,7 +247,7 @@ jobs:
         if: steps.check_variant.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: vmlinux-${{ matrix.edition }}-${{ matrix.variant }}
+          name: vmlinux-${{ github.ref_name }}-${{ matrix.edition }}-${{ matrix.variant }}
           path: vmlinux_output/*
           retention-days: 7
 
@@ -259,7 +260,8 @@ jobs:
     if: |
       needs.build.result == 'success' &&
       github.event_name == 'workflow_dispatch' &&
-      inputs.create_release == true
+      inputs.create_release == true &&
+      github.ref_name != 'thermal-override'
 
     steps:
       - name: Checkout Source Code
