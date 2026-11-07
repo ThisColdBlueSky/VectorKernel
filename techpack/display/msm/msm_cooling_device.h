@@ -16,6 +16,8 @@ struct sde_cdev {
 	struct thermal_cooling_device *cdev;
 	struct backlight_device *bd;
 	unsigned long thermal_state;
+	unsigned long requested_state;
+	struct list_head node;
 	unsigned int cdev_sf;
 };
 
