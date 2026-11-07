@@ -17,6 +17,8 @@
 #include <linux/iio/iio.h>
 #include <dt-bindings/iio/qti_power_supply_iio.h>
 #include <linux/iio/consumer.h>
+#include <linux/thermal.h>
+#include <linux/thermal_override.h>
 #include "wt_chg_iio.h"
 
 #define MSG_OWNER_BC			32778
@@ -799,23 +801,209 @@ int get_prop_batt_health(struct batt_chg *chg, union power_supply_propval *val)
 /*
  * Runtime switches for vendor thermal throttle control:
  * ignore_vendor_thermal:
- *   1 = ignore vendor thermal daemon throttle when battery & voltage are safe (default)
+ *   1 = ignore vendor thermal daemon throttle when safe (default)
  *   0 = stock behavior (always enforce vendor thermal throttle)
  * vendor_thermal_max_level:
  *   Max effective thermal mitigation level allowed when battery is safe (default: 18 = 3500mA)
+ * ignore_vendor_cpu_thermal:
+ *   1 = ignore vendor thermal CPU frequency caps when safe
+ *   0 = stock behavior (always enforce vendor CPU frequency caps)
+ * cpu_little_override_max_state:
+ *   Max cooling state floor for Little cores when override active (default: 0 -> no cap / 1.80GHz)
+ * cpu_big_override_max_state:
+ *   Max cooling state floor for Big cores when override active (default: 0 -> no cap / 2.21GHz)
+ * skin_override_max_mc:
+ *   Chassis skin temp backstop in millidegC (default: 0 = disabled; clamp 45000-60000 with 2000mC hysteresis)
  */
 static int ignore_vendor_thermal = 1;
 module_param_named(ignore_vendor_thermal, ignore_vendor_thermal, int, 0644);
-MODULE_PARM_DESC(ignore_vendor_thermal, "Ignore vendor thermal daemon throttle when battery is cool (<45C)");
+MODULE_PARM_DESC(ignore_vendor_thermal, "Master switch: ignore vendor thermal mitigation when battery is safe (removes fast-charging caps; skin backstop disabled by default)");
 
 static int vendor_thermal_max_level = 18;
 module_param_named(vendor_thermal_max_level, vendor_thermal_max_level, int, 0644);
 MODULE_PARM_DESC(vendor_thermal_max_level, "Max allowed vendor thermal throttling level when battery is safe (default: 18)");
 
+static int ignore_vendor_cpu_thermal = 0;
+module_param_named(ignore_vendor_cpu_thermal, ignore_vendor_cpu_thermal, int, 0644);
+MODULE_PARM_DESC(ignore_vendor_cpu_thermal, "Ignore vendor thermal CPU frequency caps when safe (removes CPU caps; skin backstop disabled by default)");
+
+static unsigned int cpu_little_override_max_state = 0;
+module_param_named(cpu_little_override_max_state, cpu_little_override_max_state, uint, 0644);
+MODULE_PARM_DESC(cpu_little_override_max_state, "Max cooling state floor for CPU Little cores when override active (default: 0 -> no cap / 1.80GHz)");
+
+static unsigned int cpu_big_override_max_state = 0;
+module_param_named(cpu_big_override_max_state, cpu_big_override_max_state, uint, 0644);
+MODULE_PARM_DESC(cpu_big_override_max_state, "Max cooling state floor for CPU Big cores when override active (default: 0 -> no cap / 2.21GHz)");
+
+static int skin_override_max_mc = 0;
+module_param_named(skin_override_max_mc, skin_override_max_mc, int, 0644);
+MODULE_PARM_DESC(skin_override_max_mc, "Chassis skin temp backstop in millidegC (0 = disabled by default; clamp 45000-60000 with 2000mC hysteresis)");
+
+static DEFINE_SPINLOCK(guard_lock);
+static bool guard_battery_enforced;
+static bool guard_skin_enforced;
+static int cached_bms_temp;
+static int cached_skin_temp;
+static bool cached_override_safe = true;
+
+static struct thermal_zone_device *skin_tz;
+static struct delayed_work thermal_override_poll_work;
+static struct work_struct thermal_override_reapply_work;
+
+static void (*cpu_reapply_cb)(void);
+static void (*gpu_reapply_cb)(void);
+static void (*backlight_reapply_cb)(void);
+static DEFINE_MUTEX(reapply_cb_lock);
+
+static inline bool any_vendor_override_enabled(void)
+{
+	return READ_ONCE(ignore_vendor_thermal) ||
+	       READ_ONCE(ignore_vendor_cpu_thermal);
+}
+
+static void thermal_override_reapply_work_fn(struct work_struct *work)
+{
+	void (*cpu_cb)(void);
+	void (*gpu_cb)(void);
+	void (*backlight_cb)(void);
+
+	mutex_lock(&reapply_cb_lock);
+	cpu_cb = cpu_reapply_cb;
+	gpu_cb = gpu_reapply_cb;
+	backlight_cb = backlight_reapply_cb;
+	mutex_unlock(&reapply_cb_lock);
+
+	if (cpu_cb)
+		cpu_cb();
+	if (gpu_cb)
+		gpu_cb();
+	if (backlight_cb)
+		backlight_cb();
+}
+
+void vendor_thermal_reapply(void)
+{
+	schedule_work(&thermal_override_reapply_work);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_reapply);
+
+void vendor_thermal_register_cpu_reapply(void (*fn)(void))
+{
+	mutex_lock(&reapply_cb_lock);
+	cpu_reapply_cb = fn;
+	mutex_unlock(&reapply_cb_lock);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_register_cpu_reapply);
+
+void vendor_thermal_unregister_cpu_reapply(void)
+{
+	mutex_lock(&reapply_cb_lock);
+	cpu_reapply_cb = NULL;
+	mutex_unlock(&reapply_cb_lock);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_unregister_cpu_reapply);
+
+static void thermal_override_poll_work_fn(struct work_struct *work)
+{
+	struct batt_chg *chg = g_batt_chg;
+	int bms_temp = 0, skin_temp = 0;
+	int skin_max, ret;
+	bool bms_read_ok = false, skin_read_ok = false;
+	bool prev_safe, new_safe;
+	bool state_changed = false;
+	unsigned long flags;
+
+	if (!chg)
+		goto rearm;
+
+	/* 1. Poll battery temperature from BMS */
+	ret = batt_get_iio_channel(chg, BMS, BATT_QG_TEMP, &bms_temp);
+	if (ret >= 0)
+		bms_read_ok = true;
+
+	/* 2. Poll skin temperature if skin backstop enabled */
+	skin_max = READ_ONCE(skin_override_max_mc);
+	if (skin_max > 0) {
+		if (!skin_tz || IS_ERR(skin_tz))
+			skin_tz = thermal_zone_get_zone_by_name("sdm-skin-therm-usr");
+
+		if (!IS_ERR_OR_NULL(skin_tz)) {
+			ret = thermal_zone_get_temp(skin_tz, &skin_temp);
+			if (ret >= 0)
+				skin_read_ok = true;
+		}
+	}
+
+	/* 3. Evaluate guard state under spinlock */
+	spin_lock_irqsave(&guard_lock, flags);
+	prev_safe = cached_override_safe;
+
+	if (bms_read_ok) {
+		cached_bms_temp = bms_temp;
+		/* Battery hysteresis: trip >= 450, release < 420 */
+		if (!chg->thermal_throttle_active) {
+			if (bms_temp >= 450)
+				chg->thermal_throttle_active = true;
+		} else {
+			if (bms_temp < 420)
+				chg->thermal_throttle_active = false;
+		}
+
+		/* JEITA hot check */
+		if (bms_temp >= chg->dt.jeita_temp_step5 || chg->high_temp_flag)
+			guard_battery_enforced = true;
+		else
+			guard_battery_enforced = chg->thermal_throttle_active;
+	} else {
+		/* Fail-safe on BMS read error */
+		chg->thermal_throttle_active = true;
+		guard_battery_enforced = true;
+	}
+
+	if (skin_max > 0) {
+		int thresh = clamp(skin_max, 45000, 60000);
+		int release = thresh - 2000;
+
+		if (skin_read_ok) {
+			cached_skin_temp = skin_temp;
+			if (!guard_skin_enforced) {
+				if (skin_temp >= thresh)
+					guard_skin_enforced = true;
+			} else {
+				if (skin_temp < release)
+					guard_skin_enforced = false;
+			}
+		} else {
+			/* Fail-safe on skin read error if enabled */
+			guard_skin_enforced = true;
+		}
+	} else {
+		guard_skin_enforced = false;
+	}
+
+	new_safe = !guard_battery_enforced && !guard_skin_enforced && !!READ_ONCE(ignore_vendor_thermal);
+	if (new_safe != prev_safe) {
+		cached_override_safe = new_safe;
+		state_changed = true;
+	}
+	spin_unlock_irqrestore(&guard_lock, flags);
+
+	if (state_changed)
+		vendor_thermal_reapply();
+
+rearm:
+	if (any_vendor_override_enabled())
+		schedule_delayed_work(&thermal_override_poll_work, msecs_to_jiffies(2000));
+}
+
 static bool thermal_throttle_enforced(struct batt_chg *chg)
 {
 	int bms_temp = 0;
 	int rc = 0;
+	unsigned long flags;
+	bool enforced;
+	bool prev_safe, new_safe;
+	bool state_changed = false;
 
 	if (!chg)
 		return true;
@@ -826,34 +1014,92 @@ static bool thermal_throttle_enforced(struct batt_chg *chg)
 
 	/* Read true battery temperature from BMS fuel gauge in decidegC */
 	rc = batt_get_iio_channel(chg, BMS, BATT_QG_TEMP, &bms_temp);
+
+	spin_lock_irqsave(&guard_lock, flags);
+	prev_safe = cached_override_safe;
+
 	if (rc < 0) {
 		/* Fail-safe: if BMS temperature read fails, immediately enforce thermal limit */
 		chg->thermal_throttle_active = true;
-		return true;
-	}
-
-	/*
-	 * Temperature hysteresis guardrail:
-	 * Start enforcing thermal request at >= 450 (45.0C).
-	 * Resume overriding thermal request only when cooled below 420 (42.0C).
-	 */
-	if (!chg->thermal_throttle_active) {
-		if (bms_temp >= 450)
-			chg->thermal_throttle_active = true;
+		guard_battery_enforced = true;
+		enforced = true;
 	} else {
-		if (bms_temp < 420)
-			chg->thermal_throttle_active = false;
+		cached_bms_temp = bms_temp;
+
+		/*
+		 * Temperature hysteresis guardrail:
+		 * Start enforcing thermal request at >= 450 (45.0C).
+		 * Resume overriding thermal request only when cooled below 420 (42.0C).
+		 */
+		if (!chg->thermal_throttle_active) {
+			if (bms_temp >= 450)
+				chg->thermal_throttle_active = true;
+		} else {
+			if (bms_temp < 420)
+				chg->thermal_throttle_active = false;
+		}
+
+		/* Also enforce thermal request if JEITA hot state is active (>= 48.0C or high_temp_flag) */
+		if (bms_temp >= chg->dt.jeita_temp_step5 || chg->high_temp_flag)
+			guard_battery_enforced = true;
+		else
+			guard_battery_enforced = chg->thermal_throttle_active;
+
+		enforced = guard_battery_enforced;
 	}
 
-	if (chg->thermal_throttle_active)
-		return true;
+	new_safe = !guard_battery_enforced && !guard_skin_enforced && !!READ_ONCE(ignore_vendor_thermal);
+	if (new_safe != prev_safe) {
+		cached_override_safe = new_safe;
+		state_changed = true;
+	}
+	spin_unlock_irqrestore(&guard_lock, flags);
 
-	/* Also enforce thermal request if JEITA hot state is active (>= 48.0C or high_temp_flag) */
-	if (bms_temp >= chg->dt.jeita_temp_step5 || chg->high_temp_flag)
-		return true;
+	if (state_changed)
+		vendor_thermal_reapply();
 
-	return false;
+	return enforced;
 }
+
+bool vendor_thermal_override_safe(void)
+{
+	unsigned long flags;
+	bool safe;
+
+	if (!READ_ONCE(ignore_vendor_thermal))
+		return false;
+
+	spin_lock_irqsave(&guard_lock, flags);
+	safe = cached_override_safe;
+	spin_unlock_irqrestore(&guard_lock, flags);
+
+	return safe;
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_override_safe);
+
+bool vendor_thermal_cpu_override_active(unsigned long *max_state, struct cpufreq_policy *policy)
+{
+	bool is_big = false;
+
+	if (!READ_ONCE(ignore_vendor_cpu_thermal))
+		return false;
+
+	if (!vendor_thermal_override_safe())
+		return false;
+
+	if (policy && policy->cpu >= 6)
+		is_big = true;
+
+	if (max_state) {
+		if (is_big)
+			*max_state = READ_ONCE(cpu_big_override_max_state);
+		else
+			*max_state = READ_ONCE(cpu_little_override_max_state);
+	}
+
+	return true;
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_cpu_override_active);
 
 static int sw_battery_set_cv(struct batt_chg *chg)
 {
@@ -3119,6 +3365,11 @@ static ssize_t ignore_vendor_thermal_store(struct class *c,
 	WRITE_ONCE(ignore_vendor_thermal, !!val);
 	pr_info("wt_chg: ignore_vendor_thermal set to %d\n", !!val);
 
+	if (any_vendor_override_enabled())
+		schedule_delayed_work(&thermal_override_poll_work, 0);
+
+	vendor_thermal_reapply();
+
 	if (g_batt_chg) {
 		cancel_delayed_work(&g_batt_chg->batt_chg_work);
 		schedule_delayed_work(&g_batt_chg->batt_chg_work, 0);
@@ -3174,6 +3425,135 @@ static struct class_attribute class_attr_vendor_thermal_max_level = {
 	.store = vendor_thermal_max_level_store,
 };
 
+static ssize_t ignore_vendor_cpu_thermal_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(ignore_vendor_cpu_thermal));
+}
+
+static ssize_t ignore_vendor_cpu_thermal_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	WRITE_ONCE(ignore_vendor_cpu_thermal, !!val);
+	pr_info("wt_chg: ignore_vendor_cpu_thermal set to %d\n", !!val);
+
+	if (any_vendor_override_enabled())
+		schedule_delayed_work(&thermal_override_poll_work, 0);
+
+	vendor_thermal_reapply();
+	return count;
+}
+static struct class_attribute class_attr_ignore_vendor_cpu_thermal = {
+	.attr = {
+		.name = "ignore_vendor_cpu_thermal",
+		.mode = 0644,
+	},
+	.show = ignore_vendor_cpu_thermal_show,
+	.store = ignore_vendor_cpu_thermal_store,
+};
+
+static ssize_t cpu_little_override_max_state_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", READ_ONCE(cpu_little_override_max_state));
+}
+
+static ssize_t cpu_little_override_max_state_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	WRITE_ONCE(cpu_little_override_max_state, val);
+	pr_info("wt_chg: cpu_little_override_max_state set to %u\n", val);
+	vendor_thermal_reapply();
+	return count;
+}
+static struct class_attribute class_attr_cpu_little_override_max_state = {
+	.attr = {
+		.name = "cpu_little_override_max_state",
+		.mode = 0644,
+	},
+	.show = cpu_little_override_max_state_show,
+	.store = cpu_little_override_max_state_store,
+};
+
+static ssize_t cpu_big_override_max_state_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", READ_ONCE(cpu_big_override_max_state));
+}
+
+static ssize_t cpu_big_override_max_state_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	WRITE_ONCE(cpu_big_override_max_state, val);
+	pr_info("wt_chg: cpu_big_override_max_state set to %u\n", val);
+	vendor_thermal_reapply();
+	return count;
+}
+static struct class_attribute class_attr_cpu_big_override_max_state = {
+	.attr = {
+		.name = "cpu_big_override_max_state",
+		.mode = 0644,
+	},
+	.show = cpu_big_override_max_state_show,
+	.store = cpu_big_override_max_state_store,
+};
+
+static ssize_t skin_override_max_mc_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(skin_override_max_mc));
+}
+
+static ssize_t skin_override_max_mc_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	if (val > 0)
+		val = clamp(val, 45000, 60000);
+	else
+		val = 0;
+
+	WRITE_ONCE(skin_override_max_mc, val);
+	pr_info("wt_chg: skin_override_max_mc set to %d\n", val);
+
+	if (any_vendor_override_enabled())
+		schedule_delayed_work(&thermal_override_poll_work, 0);
+
+	vendor_thermal_reapply();
+	return count;
+}
+static struct class_attribute class_attr_skin_override_max_mc = {
+	.attr = {
+		.name = "skin_override_max_mc",
+		.mode = 0644,
+	},
+	.show = skin_override_max_mc_show,
+	.store = skin_override_max_mc_store,
+};
+
 static struct attribute *battery_class_attrs[] = {
 	&class_attr_soc_decimal.attr,
 	&class_attr_shutdown_delay.attr,
@@ -3214,6 +3594,10 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_usb_icl_override_ma.attr,
 	&class_attr_ignore_vendor_thermal.attr,
 	&class_attr_vendor_thermal_max_level.attr,
+	&class_attr_ignore_vendor_cpu_thermal.attr,
+	&class_attr_cpu_little_override_max_state.attr,
+	&class_attr_cpu_big_override_max_state.attr,
+	&class_attr_skin_override_max_mc.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(battery_class);
@@ -3759,6 +4143,11 @@ static int batt_chg_probe(struct platform_device *pdev)
 	batt_chg->usb_icl_override_ma = 0;
 	g_batt_chg = batt_chg;
 
+	INIT_DELAYED_WORK(&thermal_override_poll_work, thermal_override_poll_work_fn);
+	INIT_WORK(&thermal_override_reapply_work, thermal_override_reapply_work_fn);
+	if (any_vendor_override_enabled())
+		schedule_delayed_work(&thermal_override_poll_work, 0);
+
 	rc = batt_init_iio_psy(batt_chg);
 	if (rc < 0) {
 		pr_err("Failed to initialize QG IIO PSY, rc=%d\n", rc);
@@ -3836,6 +4225,8 @@ cleanup:
 
 static int batt_chg_remove(struct platform_device *pdev)
 {
+	cancel_delayed_work_sync(&thermal_override_poll_work);
+	cancel_work_sync(&thermal_override_reapply_work);
 	return 0;
 }
 
