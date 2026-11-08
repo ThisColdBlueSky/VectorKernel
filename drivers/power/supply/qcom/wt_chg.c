@@ -17,6 +17,8 @@
 #include <linux/iio/iio.h>
 #include <dt-bindings/iio/qti_power_supply_iio.h>
 #include <linux/iio/consumer.h>
+#include <linux/thermal.h>
+#include <linux/thermal_override.h>
 #include "wt_chg_iio.h"
 
 #define MSG_OWNER_BC			32778
@@ -443,6 +445,7 @@ struct batt_chg {
 	struct mutex bypass_lock;
 	int usb_icl_override_ma;
 	struct mutex icl_lock;
+	bool thermal_throttle_active;
 };
 
 struct batt_chg *g_batt_chg;
@@ -795,6 +798,736 @@ int get_prop_batt_health(struct batt_chg *chg, union power_supply_propval *val)
 	return 0;
 }
 
+/*
+ * Runtime switches for vendor thermal throttle control:
+ * ignore_vendor_thermal:
+ *   1 = ignore vendor thermal daemon throttle when safe (default)
+ *   0 = stock behavior (always enforce vendor thermal throttle)
+ * vendor_thermal_max_level:
+ *   Max effective thermal mitigation level allowed when battery is safe (default: 18 = 3500mA)
+ * ignore_vendor_cpu_thermal:
+ *   1 = ignore vendor thermal CPU frequency caps when safe
+ *   0 = stock behavior (always enforce vendor CPU frequency caps)
+ * cpu_little_override_max_state:
+ *   Max cooling state floor for Little cores when override active (default: 0 -> no cap / 1.80GHz)
+ * cpu_big_override_max_state:
+ *   Max cooling state floor for Big cores when override active (default: 0 -> no cap / 2.21GHz)
+ * skin_override_max_mc:
+ *   Chassis skin temp backstop in millidegC (default: 0 = disabled; clamp 45000-60000 with 2000mC hysteresis)
+ */
+static int ignore_vendor_thermal = 1;
+static int vendor_thermal_max_level = 18;
+static int ignore_vendor_cpu_thermal = 0;
+static unsigned int cpu_little_override_max_state = 0;
+static unsigned int cpu_big_override_max_state = 0;
+static int ignore_vendor_gpu_thermal = 0;
+static unsigned int gpu_override_max_state = 0;
+static int ignore_vendor_backlight_thermal = 0;
+static int skin_override_max_mc = 0;
+static unsigned int battery_trip_decic = 450;
+static unsigned int battery_clear_decic = 420;
+
+static DEFINE_SPINLOCK(guard_lock);
+static bool guard_battery_enforced;
+static bool guard_skin_enforced;
+static bool cached_override_safe = false;
+static bool thermal_override_initialized = false;
+
+static struct thermal_zone_device *skin_tz;
+static struct delayed_work thermal_override_poll_work;
+static struct work_struct thermal_override_reapply_work;
+
+static void (*cpu_reapply_cb)(void);
+static void (*gpu_reapply_cb)(void);
+static void (*backlight_reapply_cb)(void);
+static DEFINE_MUTEX(reapply_cb_lock);
+
+static inline bool thermal_override_poll_needed(void)
+{
+	return READ_ONCE(ignore_vendor_cpu_thermal) ||
+	       READ_ONCE(ignore_vendor_gpu_thermal) ||
+	       READ_ONCE(ignore_vendor_backlight_thermal) ||
+	       (READ_ONCE(skin_override_max_mc) > 0);
+}
+
+static void thermal_override_reapply_work_fn(struct work_struct *work)
+{
+	void (*cpu_cb)(void);
+	void (*gpu_cb)(void);
+	void (*backlight_cb)(void);
+
+	mutex_lock(&reapply_cb_lock);
+	cpu_cb = cpu_reapply_cb;
+	gpu_cb = gpu_reapply_cb;
+	backlight_cb = backlight_reapply_cb;
+	mutex_unlock(&reapply_cb_lock);
+
+	if (cpu_cb)
+		cpu_cb();
+	if (gpu_cb)
+		gpu_cb();
+	if (backlight_cb)
+		backlight_cb();
+}
+
+void vendor_thermal_reapply(void)
+{
+	if (!smp_load_acquire(&thermal_override_initialized))
+		return;
+
+	schedule_work(&thermal_override_reapply_work);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_reapply);
+
+static void set_ignore_vendor_thermal_val(int val)
+{
+	WRITE_ONCE(ignore_vendor_thermal, !!val);
+	pr_info("wt_chg: ignore_vendor_thermal set to %d\n", !!val);
+
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
+
+		vendor_thermal_reapply();
+
+		if (g_batt_chg) {
+			cancel_delayed_work(&g_batt_chg->batt_chg_work);
+			schedule_delayed_work(&g_batt_chg->batt_chg_work, 0);
+		}
+	}
+}
+
+static int param_set_ignore_vendor_thermal(const char *val, const struct kernel_param *kp)
+{
+	int ret, num;
+
+	ret = kstrtoint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_ignore_vendor_thermal_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops ignore_vendor_thermal_param_ops = {
+	.set = param_set_ignore_vendor_thermal,
+	.get = param_get_int,
+};
+module_param_cb(ignore_vendor_thermal, &ignore_vendor_thermal_param_ops, &ignore_vendor_thermal, 0644);
+MODULE_PARM_DESC(ignore_vendor_thermal, "Master switch: ignore vendor thermal mitigation when battery is safe (removes fast-charging caps; skin backstop disabled by default)");
+
+static void set_vendor_thermal_max_level_val(int val)
+{
+	if (val < 0)
+		val = 0;
+	else if (val > 24)
+		val = 24;
+
+	WRITE_ONCE(vendor_thermal_max_level, val);
+	pr_info("wt_chg: vendor_thermal_max_level set to %d\n", val);
+
+	if (smp_load_acquire(&thermal_override_initialized) && g_batt_chg) {
+		cancel_delayed_work(&g_batt_chg->batt_chg_work);
+		schedule_delayed_work(&g_batt_chg->batt_chg_work, 0);
+	}
+}
+
+static int param_set_vendor_thermal_max_level(const char *val, const struct kernel_param *kp)
+{
+	int ret, num;
+
+	ret = kstrtoint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_vendor_thermal_max_level_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops vendor_thermal_max_level_param_ops = {
+	.set = param_set_vendor_thermal_max_level,
+	.get = param_get_int,
+};
+module_param_cb(vendor_thermal_max_level, &vendor_thermal_max_level_param_ops, &vendor_thermal_max_level, 0644);
+MODULE_PARM_DESC(vendor_thermal_max_level, "Max allowed vendor thermal throttling level when battery is safe (default: 18)");
+
+static void set_ignore_vendor_cpu_thermal_val(int val)
+{
+	WRITE_ONCE(ignore_vendor_cpu_thermal, !!val);
+	pr_info("wt_chg: ignore_vendor_cpu_thermal set to %d\n", !!val);
+
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
+
+		vendor_thermal_reapply();
+	}
+}
+
+static int param_set_ignore_vendor_cpu_thermal(const char *val, const struct kernel_param *kp)
+{
+	int ret, num;
+
+	ret = kstrtoint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_ignore_vendor_cpu_thermal_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops ignore_vendor_cpu_thermal_param_ops = {
+	.set = param_set_ignore_vendor_cpu_thermal,
+	.get = param_get_int,
+};
+module_param_cb(ignore_vendor_cpu_thermal, &ignore_vendor_cpu_thermal_param_ops, &ignore_vendor_cpu_thermal, 0644);
+MODULE_PARM_DESC(ignore_vendor_cpu_thermal, "Ignore vendor thermal CPU frequency caps when safe (removes CPU caps; skin backstop disabled by default)");
+
+static void set_cpu_little_override_max_state_val(unsigned int val)
+{
+	WRITE_ONCE(cpu_little_override_max_state, val);
+	pr_info("wt_chg: cpu_little_override_max_state set to %u\n", val);
+
+	if (smp_load_acquire(&thermal_override_initialized))
+		vendor_thermal_reapply();
+}
+
+static int param_set_cpu_little_override_max_state(const char *val, const struct kernel_param *kp)
+{
+	int ret;
+	unsigned int num;
+
+	ret = kstrtouint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_cpu_little_override_max_state_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops cpu_little_override_max_state_param_ops = {
+	.set = param_set_cpu_little_override_max_state,
+	.get = param_get_uint,
+};
+module_param_cb(cpu_little_override_max_state, &cpu_little_override_max_state_param_ops, &cpu_little_override_max_state, 0644);
+MODULE_PARM_DESC(cpu_little_override_max_state, "Max cooling state floor for CPU Little cores when override active (default: 0 -> no cap / 1.80GHz)");
+
+static void set_cpu_big_override_max_state_val(unsigned int val)
+{
+	WRITE_ONCE(cpu_big_override_max_state, val);
+	pr_info("wt_chg: cpu_big_override_max_state set to %u\n", val);
+
+	if (smp_load_acquire(&thermal_override_initialized))
+		vendor_thermal_reapply();
+}
+
+static int param_set_cpu_big_override_max_state(const char *val, const struct kernel_param *kp)
+{
+	int ret;
+	unsigned int num;
+
+	ret = kstrtouint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_cpu_big_override_max_state_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops cpu_big_override_max_state_param_ops = {
+	.set = param_set_cpu_big_override_max_state,
+	.get = param_get_uint,
+};
+module_param_cb(cpu_big_override_max_state, &cpu_big_override_max_state_param_ops, &cpu_big_override_max_state, 0644);
+MODULE_PARM_DESC(cpu_big_override_max_state, "Max cooling state floor for CPU Big cores when override active (default: 0 -> no cap / 2.21GHz)");
+
+static void set_ignore_vendor_gpu_thermal_val(int val)
+{
+	WRITE_ONCE(ignore_vendor_gpu_thermal, !!val);
+	pr_info("wt_chg: ignore_vendor_gpu_thermal set to %d\n", !!val);
+
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
+
+		vendor_thermal_reapply();
+	}
+}
+
+static int param_set_ignore_vendor_gpu_thermal(const char *val, const struct kernel_param *kp)
+{
+	int ret, num;
+
+	ret = kstrtoint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_ignore_vendor_gpu_thermal_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops ignore_vendor_gpu_thermal_param_ops = {
+	.set = param_set_ignore_vendor_gpu_thermal,
+	.get = param_get_int,
+};
+module_param_cb(ignore_vendor_gpu_thermal, &ignore_vendor_gpu_thermal_param_ops, &ignore_vendor_gpu_thermal, 0644);
+MODULE_PARM_DESC(ignore_vendor_gpu_thermal, "Ignore vendor thermal GPU frequency caps when safe (removes GPU caps; skin backstop disabled by default)");
+
+static void set_gpu_override_max_state_val(unsigned int val)
+{
+	WRITE_ONCE(gpu_override_max_state, val);
+	pr_info("wt_chg: gpu_override_max_state set to %u\n", val);
+
+	if (smp_load_acquire(&thermal_override_initialized))
+		vendor_thermal_reapply();
+}
+
+static int param_set_gpu_override_max_state(const char *val, const struct kernel_param *kp)
+{
+	int ret;
+	unsigned int num;
+
+	ret = kstrtouint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_gpu_override_max_state_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops gpu_override_max_state_param_ops = {
+	.set = param_set_gpu_override_max_state,
+	.get = param_get_uint,
+};
+module_param_cb(gpu_override_max_state, &gpu_override_max_state_param_ops, &gpu_override_max_state, 0644);
+MODULE_PARM_DESC(gpu_override_max_state, "Max cooling state floor for GPU when override active (default: 0 -> no cap / 840MHz)");
+
+static void set_ignore_vendor_backlight_thermal_val(int val)
+{
+	WRITE_ONCE(ignore_vendor_backlight_thermal, !!val);
+	pr_info("wt_chg: ignore_vendor_backlight_thermal set to %d\n", !!val);
+
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
+
+		vendor_thermal_reapply();
+	}
+}
+
+static int param_set_ignore_vendor_backlight_thermal(const char *val, const struct kernel_param *kp)
+{
+	int ret, num;
+
+	ret = kstrtoint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_ignore_vendor_backlight_thermal_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops ignore_vendor_backlight_thermal_param_ops = {
+	.set = param_set_ignore_vendor_backlight_thermal,
+	.get = param_get_int,
+};
+module_param_cb(ignore_vendor_backlight_thermal, &ignore_vendor_backlight_thermal_param_ops, &ignore_vendor_backlight_thermal, 0644);
+MODULE_PARM_DESC(ignore_vendor_backlight_thermal, "Ignore vendor thermal backlight dimming when safe (removes backlight caps; skin backstop disabled by default)");
+
+static void set_skin_override_max_mc_val(int val)
+{
+	if (val > 0)
+		val = clamp(val, 45000, 60000);
+	else
+		val = 0;
+
+	WRITE_ONCE(skin_override_max_mc, val);
+	pr_info("wt_chg: skin_override_max_mc set to %d\n", val);
+
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
+
+		vendor_thermal_reapply();
+	}
+}
+
+static int param_set_skin_override_max_mc(const char *val, const struct kernel_param *kp)
+{
+	int ret, num;
+
+	ret = kstrtoint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_skin_override_max_mc_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops skin_override_max_mc_param_ops = {
+	.set = param_set_skin_override_max_mc,
+	.get = param_get_int,
+};
+module_param_cb(skin_override_max_mc, &skin_override_max_mc_param_ops, &skin_override_max_mc, 0644);
+MODULE_PARM_DESC(skin_override_max_mc, "Chassis skin temp backstop in millidegC (0 = disabled by default; clamp 45000-60000 with 2000mC hysteresis)");
+
+static void set_battery_trip_decic_val(unsigned int val)
+{
+	val = clamp_val(val, 400U, 470U);
+	WRITE_ONCE(battery_trip_decic, val);
+	if (READ_ONCE(battery_clear_decic) > val - 20)
+		WRITE_ONCE(battery_clear_decic, val - 20);
+
+	pr_info("wt_chg: battery_trip_decic set to %u (clear: %u)\n",
+		val, READ_ONCE(battery_clear_decic));
+
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
+
+		vendor_thermal_reapply();
+	}
+}
+
+static int param_set_battery_trip_decic(const char *val, const struct kernel_param *kp)
+{
+	int ret;
+	unsigned int num;
+
+	ret = kstrtouint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_battery_trip_decic_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops battery_trip_decic_param_ops = {
+	.set = param_set_battery_trip_decic,
+	.get = param_get_uint,
+};
+module_param_cb(battery_trip_decic, &battery_trip_decic_param_ops, &battery_trip_decic, 0644);
+MODULE_PARM_DESC(battery_trip_decic, "Battery throttle trip temp in decidegC (default: 450 = 45.0C; clamp 400-470)");
+
+static void set_battery_clear_decic_val(unsigned int val)
+{
+	unsigned int trip = READ_ONCE(battery_trip_decic);
+	unsigned int max_clear = (trip > 20) ? trip - 20 : 0;
+
+	val = clamp_val(val, 300U, max_clear);
+	WRITE_ONCE(battery_clear_decic, val);
+
+	pr_info("wt_chg: battery_clear_decic set to %u (trip: %u)\n",
+		val, trip);
+
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		if (thermal_override_poll_needed())
+			schedule_delayed_work(&thermal_override_poll_work, 0);
+
+		vendor_thermal_reapply();
+	}
+}
+
+static int param_set_battery_clear_decic(const char *val, const struct kernel_param *kp)
+{
+	int ret;
+	unsigned int num;
+
+	ret = kstrtouint(val, 10, &num);
+	if (ret)
+		return ret;
+
+	set_battery_clear_decic_val(num);
+	return 0;
+}
+
+static const struct kernel_param_ops battery_clear_decic_param_ops = {
+	.set = param_set_battery_clear_decic,
+	.get = param_get_uint,
+};
+module_param_cb(battery_clear_decic, &battery_clear_decic_param_ops, &battery_clear_decic, 0644);
+MODULE_PARM_DESC(battery_clear_decic, "Battery throttle clear temp in decidegC (default: 420 = 42.0C; max trip-20)");
+
+void vendor_thermal_register_cpu_reapply(void (*fn)(void))
+{
+	mutex_lock(&reapply_cb_lock);
+	cpu_reapply_cb = fn;
+	mutex_unlock(&reapply_cb_lock);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_register_cpu_reapply);
+
+void vendor_thermal_unregister_cpu_reapply(void)
+{
+	mutex_lock(&reapply_cb_lock);
+	cpu_reapply_cb = NULL;
+	mutex_unlock(&reapply_cb_lock);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_unregister_cpu_reapply);
+
+void vendor_thermal_register_gpu_reapply(void (*fn)(void))
+{
+	mutex_lock(&reapply_cb_lock);
+	gpu_reapply_cb = fn;
+	mutex_unlock(&reapply_cb_lock);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_register_gpu_reapply);
+
+void vendor_thermal_unregister_gpu_reapply(void)
+{
+	mutex_lock(&reapply_cb_lock);
+	gpu_reapply_cb = NULL;
+	mutex_unlock(&reapply_cb_lock);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_unregister_gpu_reapply);
+
+void vendor_thermal_register_backlight_reapply(void (*fn)(void))
+{
+	mutex_lock(&reapply_cb_lock);
+	backlight_reapply_cb = fn;
+	mutex_unlock(&reapply_cb_lock);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_register_backlight_reapply);
+
+void vendor_thermal_unregister_backlight_reapply(void)
+{
+	mutex_lock(&reapply_cb_lock);
+	backlight_reapply_cb = NULL;
+	mutex_unlock(&reapply_cb_lock);
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_unregister_backlight_reapply);
+
+static void thermal_override_poll_work_fn(struct work_struct *work)
+{
+	struct batt_chg *chg = g_batt_chg;
+	int bms_temp = 0, skin_temp = 0;
+	int skin_max, ret;
+	bool bms_read_ok = false, skin_read_ok = false;
+	bool prev_safe, new_safe;
+	bool state_changed = false;
+	unsigned long flags;
+	unsigned int trip, clear;
+
+	if (!smp_load_acquire(&thermal_override_initialized))
+		return;
+
+	if (!chg)
+		goto rearm;
+
+	/* 1. Poll battery temperature from BMS */
+	ret = batt_get_iio_channel(chg, BMS, BATT_QG_TEMP, &bms_temp);
+	if (ret >= 0)
+		bms_read_ok = true;
+
+	/* 2. Poll skin temperature if skin backstop enabled */
+	skin_max = READ_ONCE(skin_override_max_mc);
+	if (skin_max > 0) {
+		if (!skin_tz || IS_ERR(skin_tz))
+			skin_tz = thermal_zone_get_zone_by_name("sdm-skin-therm-usr");
+
+		if (!IS_ERR_OR_NULL(skin_tz)) {
+			ret = thermal_zone_get_temp(skin_tz, &skin_temp);
+			if (ret >= 0)
+				skin_read_ok = true;
+		}
+	}
+
+	/* 3. Evaluate guard state under spinlock */
+	spin_lock_irqsave(&guard_lock, flags);
+	prev_safe = cached_override_safe;
+
+	trip = READ_ONCE(battery_trip_decic);
+	clear = READ_ONCE(battery_clear_decic);
+
+	if (bms_read_ok) {
+		/* Battery hysteresis: trip >= trip, release < clear */
+		if (!chg->thermal_throttle_active) {
+			if (bms_temp >= (int)trip)
+				chg->thermal_throttle_active = true;
+		} else {
+			if (bms_temp < (int)clear)
+				chg->thermal_throttle_active = false;
+		}
+
+		/* JEITA hot check */
+		if (bms_temp >= chg->dt.jeita_temp_step5 || chg->high_temp_flag)
+			guard_battery_enforced = true;
+		else
+			guard_battery_enforced = chg->thermal_throttle_active;
+	} else {
+		/* Fail-safe on BMS read error */
+		chg->thermal_throttle_active = true;
+		guard_battery_enforced = true;
+	}
+
+	if (skin_max > 0) {
+		int thresh = clamp(skin_max, 45000, 60000);
+		int release = thresh - 2000;
+
+		if (skin_read_ok) {
+			if (!guard_skin_enforced) {
+				if (skin_temp >= thresh)
+					guard_skin_enforced = true;
+			} else {
+				if (skin_temp < release)
+					guard_skin_enforced = false;
+			}
+		} else {
+			/* Fail-safe on skin read error if enabled */
+			guard_skin_enforced = true;
+		}
+	} else {
+		guard_skin_enforced = false;
+	}
+
+	new_safe = bms_read_ok && !guard_battery_enforced && !guard_skin_enforced && !!READ_ONCE(ignore_vendor_thermal);
+	if (new_safe != prev_safe) {
+		cached_override_safe = new_safe;
+		state_changed = true;
+	}
+	spin_unlock_irqrestore(&guard_lock, flags);
+
+	if (state_changed)
+		vendor_thermal_reapply();
+
+rearm:
+	if (smp_load_acquire(&thermal_override_initialized) && thermal_override_poll_needed())
+		schedule_delayed_work(&thermal_override_poll_work, msecs_to_jiffies(2000));
+}
+
+static bool thermal_throttle_enforced(struct batt_chg *chg)
+{
+	int bms_temp = 0;
+	int rc = 0;
+	unsigned long flags;
+	bool enforced;
+	bool prev_safe, new_safe;
+	bool state_changed = false;
+	unsigned int trip, clear;
+
+	if (!chg || !smp_load_acquire(&thermal_override_initialized))
+		return true;
+
+	/* If disabled at runtime, behave 100% like stock (enforce throttle) */
+	if (!READ_ONCE(ignore_vendor_thermal))
+		return true;
+
+	/* Read true battery temperature from BMS fuel gauge in decidegC */
+	rc = batt_get_iio_channel(chg, BMS, BATT_QG_TEMP, &bms_temp);
+
+	spin_lock_irqsave(&guard_lock, flags);
+	prev_safe = cached_override_safe;
+
+	trip = READ_ONCE(battery_trip_decic);
+	clear = READ_ONCE(battery_clear_decic);
+
+	if (rc < 0) {
+		/* Fail-safe: if BMS temperature read fails, immediately enforce thermal limit */
+		chg->thermal_throttle_active = true;
+		guard_battery_enforced = true;
+		enforced = true;
+	} else {
+		/*
+		 * Temperature hysteresis guardrail:
+		 * Start enforcing thermal request at >= trip (default 450 = 45.0C).
+		 * Resume overriding thermal request only when cooled below clear (default 420 = 42.0C).
+		 */
+		if (!chg->thermal_throttle_active) {
+			if (bms_temp >= (int)trip)
+				chg->thermal_throttle_active = true;
+		} else {
+			if (bms_temp < (int)clear)
+				chg->thermal_throttle_active = false;
+		}
+
+		/* Also enforce thermal request if JEITA hot state is active (>= 48.0C or high_temp_flag) */
+		if (bms_temp >= chg->dt.jeita_temp_step5 || chg->high_temp_flag)
+			guard_battery_enforced = true;
+		else
+			guard_battery_enforced = chg->thermal_throttle_active;
+
+		enforced = guard_battery_enforced;
+	}
+
+	new_safe = (rc >= 0) && !guard_battery_enforced && !guard_skin_enforced && !!READ_ONCE(ignore_vendor_thermal);
+	if (new_safe != prev_safe) {
+		cached_override_safe = new_safe;
+		state_changed = true;
+	}
+	spin_unlock_irqrestore(&guard_lock, flags);
+
+	if (state_changed)
+		vendor_thermal_reapply();
+
+	return enforced;
+}
+
+bool vendor_thermal_override_safe(void)
+{
+	unsigned long flags;
+	bool safe;
+
+	if (!smp_load_acquire(&thermal_override_initialized))
+		return false;
+
+	if (!READ_ONCE(ignore_vendor_thermal))
+		return false;
+
+	spin_lock_irqsave(&guard_lock, flags);
+	safe = cached_override_safe;
+	spin_unlock_irqrestore(&guard_lock, flags);
+
+	return safe;
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_override_safe);
+
+bool vendor_thermal_cpu_override_active(unsigned long *max_state, struct cpufreq_policy *policy)
+{
+	bool is_big = false;
+
+	if (!READ_ONCE(ignore_vendor_cpu_thermal))
+		return false;
+
+	if (!vendor_thermal_override_safe())
+		return false;
+
+	if (policy && policy->cpu >= 6)
+		is_big = true;
+
+	if (max_state) {
+		if (is_big)
+			*max_state = READ_ONCE(cpu_big_override_max_state);
+		else
+			*max_state = READ_ONCE(cpu_little_override_max_state);
+	}
+
+	return true;
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_cpu_override_active);
+
+bool vendor_thermal_gpu_override_active(unsigned long *max_state)
+{
+	if (!READ_ONCE(ignore_vendor_gpu_thermal))
+		return false;
+
+	if (!vendor_thermal_override_safe())
+		return false;
+
+	if (max_state)
+		*max_state = READ_ONCE(gpu_override_max_state);
+
+	return true;
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_gpu_override_active);
+
+bool vendor_thermal_backlight_override_active(void)
+{
+	if (!READ_ONCE(ignore_vendor_backlight_thermal))
+		return false;
+
+	return vendor_thermal_override_safe();
+}
+EXPORT_SYMBOL_GPL(vendor_thermal_backlight_override_active);
+
 static int sw_battery_set_cv(struct batt_chg *chg)
 {
 	int cv = 0;
@@ -817,7 +1550,8 @@ static int sw_battery_set_cv(struct batt_chg *chg)
 	if (cur_now < 0)
 		cur = 0 - (cur_now / 1000);
 	chg->batt_id = batt_id;
-	if (chg->batt_auth && chg->pd_auth && (chg->system_temp_level != 24)) {
+	if (chg->batt_auth && chg->pd_auth &&
+	    (!thermal_throttle_enforced(chg) || chg->system_temp_level != 24)) {
 		if (temp >= 150 && temp < 350 && batt_id) {
 			charger_term = 896;
 			if(cur < charger_term - 40)
@@ -1180,8 +1914,16 @@ static int sw_battery_jeita(struct batt_chg *chg)
 		if (get_boot_mode()) {
 			them_curr = power_off_charge_them(chg, temp);
 			cur = 12050;
-		} else
-			them_curr = thermal_mitigation[chg->system_temp_level] / 1000;
+		} else {
+			int lvl;
+			if (thermal_throttle_enforced(chg)) {
+				lvl = chg->system_temp_level;
+			} else {
+				int max_lvl = clamp(READ_ONCE(vendor_thermal_max_level), 0, chg->thermal_levels);
+				lvl = min(chg->system_temp_level, max_lvl);
+			}
+			them_curr = thermal_mitigation[lvl] / 1000;
+		}
 		cur = min(cur, them_curr);
 		batt_set_iio_channel(chg, BMS, BATT_QG_FCC_MAX, cur);
 		if (chg->is_pps_on && !chg->fastcharge_mode && chg->pd_auth) {
@@ -1189,10 +1931,18 @@ static int sw_battery_jeita(struct batt_chg *chg)
 			chg->fastcharge_mode = 1;
 		}
 	} else {
-		if (get_boot_mode())
+		if (get_boot_mode()) {
 			them_curr = power_off_charge_them(chg, temp);
-		else
-			them_curr = thermal_mitigation[chg->system_temp_level] / 1000;
+		} else {
+			int lvl;
+			if (thermal_throttle_enforced(chg)) {
+				lvl = chg->system_temp_level;
+			} else {
+				int max_lvl = clamp(READ_ONCE(vendor_thermal_max_level), 0, chg->thermal_levels);
+				lvl = min(chg->system_temp_level, max_lvl);
+			}
+			them_curr = thermal_mitigation[lvl] / 1000;
+		}
 		cur = min(cur, them_curr);
 		batt_set_iio_channel(chg, BMS, BATT_QG_FCC_MAX, cur);
 	}
@@ -1957,6 +2707,7 @@ static int batt_init_config(struct batt_chg *chg)
 	chg->charge_voltage_max = 4450000;
 	chg->charge_design_voltage_max = 11000000;
 	chg->system_temp_level = 0;
+	chg->thermal_throttle_active = false;
 	chg->batt_iterm = 250;
 	chg->thermal_levels = 24;
 	chg->shutdown_flag = false;
@@ -3023,6 +3774,303 @@ static struct class_attribute class_attr_usb_icl_override_ma = {
 	.store = usb_icl_override_ma_store,
 };
 
+static ssize_t ignore_vendor_thermal_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(ignore_vendor_thermal));
+}
+
+static ssize_t ignore_vendor_thermal_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	set_ignore_vendor_thermal_val(val);
+	return count;
+}
+static struct class_attribute class_attr_ignore_vendor_thermal = {
+	.attr = {
+		.name = "ignore_vendor_thermal",
+		.mode = 0644,
+	},
+	.show = ignore_vendor_thermal_show,
+	.store = ignore_vendor_thermal_store,
+};
+
+static ssize_t vendor_thermal_max_level_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(vendor_thermal_max_level));
+}
+
+static ssize_t vendor_thermal_max_level_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	set_vendor_thermal_max_level_val(val);
+	return count;
+}
+static struct class_attribute class_attr_vendor_thermal_max_level = {
+	.attr = {
+		.name = "vendor_thermal_max_level",
+		.mode = 0644,
+	},
+	.show = vendor_thermal_max_level_show,
+	.store = vendor_thermal_max_level_store,
+};
+
+static ssize_t ignore_vendor_cpu_thermal_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(ignore_vendor_cpu_thermal));
+}
+
+static ssize_t ignore_vendor_cpu_thermal_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	set_ignore_vendor_cpu_thermal_val(val);
+	return count;
+}
+static struct class_attribute class_attr_ignore_vendor_cpu_thermal = {
+	.attr = {
+		.name = "ignore_vendor_cpu_thermal",
+		.mode = 0644,
+	},
+	.show = ignore_vendor_cpu_thermal_show,
+	.store = ignore_vendor_cpu_thermal_store,
+};
+
+static ssize_t cpu_little_override_max_state_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", READ_ONCE(cpu_little_override_max_state));
+}
+
+static ssize_t cpu_little_override_max_state_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	set_cpu_little_override_max_state_val(val);
+	return count;
+}
+static struct class_attribute class_attr_cpu_little_override_max_state = {
+	.attr = {
+		.name = "cpu_little_override_max_state",
+		.mode = 0644,
+	},
+	.show = cpu_little_override_max_state_show,
+	.store = cpu_little_override_max_state_store,
+};
+
+static ssize_t cpu_big_override_max_state_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", READ_ONCE(cpu_big_override_max_state));
+}
+
+static ssize_t cpu_big_override_max_state_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	set_cpu_big_override_max_state_val(val);
+	return count;
+}
+static struct class_attribute class_attr_cpu_big_override_max_state = {
+	.attr = {
+		.name = "cpu_big_override_max_state",
+		.mode = 0644,
+	},
+	.show = cpu_big_override_max_state_show,
+	.store = cpu_big_override_max_state_store,
+};
+
+static ssize_t skin_override_max_mc_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(skin_override_max_mc));
+}
+
+static ssize_t skin_override_max_mc_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	set_skin_override_max_mc_val(val);
+	return count;
+}
+static struct class_attribute class_attr_skin_override_max_mc = {
+	.attr = {
+		.name = "skin_override_max_mc",
+		.mode = 0644,
+	},
+	.show = skin_override_max_mc_show,
+	.store = skin_override_max_mc_store,
+};
+
+static ssize_t ignore_vendor_gpu_thermal_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(ignore_vendor_gpu_thermal));
+}
+
+static ssize_t ignore_vendor_gpu_thermal_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	set_ignore_vendor_gpu_thermal_val(val);
+	return count;
+}
+static struct class_attribute class_attr_ignore_vendor_gpu_thermal = {
+	.attr = {
+		.name = "ignore_vendor_gpu_thermal",
+		.mode = 0644,
+	},
+	.show = ignore_vendor_gpu_thermal_show,
+	.store = ignore_vendor_gpu_thermal_store,
+};
+
+static ssize_t gpu_override_max_state_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", READ_ONCE(gpu_override_max_state));
+}
+
+static ssize_t gpu_override_max_state_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	set_gpu_override_max_state_val(val);
+	return count;
+}
+static struct class_attribute class_attr_gpu_override_max_state = {
+	.attr = {
+		.name = "gpu_override_max_state",
+		.mode = 0644,
+	},
+	.show = gpu_override_max_state_show,
+	.store = gpu_override_max_state_store,
+};
+
+static ssize_t ignore_vendor_backlight_thermal_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(ignore_vendor_backlight_thermal));
+}
+
+static ssize_t ignore_vendor_backlight_thermal_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	int val;
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	set_ignore_vendor_backlight_thermal_val(val);
+	return count;
+}
+static struct class_attribute class_attr_ignore_vendor_backlight_thermal = {
+	.attr = {
+		.name = "ignore_vendor_backlight_thermal",
+		.mode = 0644,
+	},
+	.show = ignore_vendor_backlight_thermal_show,
+	.store = ignore_vendor_backlight_thermal_store,
+};
+
+static ssize_t battery_trip_decic_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", READ_ONCE(battery_trip_decic));
+}
+
+static ssize_t battery_trip_decic_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	set_battery_trip_decic_val(val);
+	return count;
+}
+static struct class_attribute class_attr_battery_trip_decic = {
+	.attr = {
+		.name = "battery_trip_decic",
+		.mode = 0644,
+	},
+	.show = battery_trip_decic_show,
+	.store = battery_trip_decic_store,
+};
+
+static ssize_t battery_clear_decic_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", READ_ONCE(battery_clear_decic));
+}
+
+static ssize_t battery_clear_decic_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	set_battery_clear_decic_val(val);
+	return count;
+}
+static struct class_attribute class_attr_battery_clear_decic = {
+	.attr = {
+		.name = "battery_clear_decic",
+		.mode = 0644,
+	},
+	.show = battery_clear_decic_show,
+	.store = battery_clear_decic_store,
+};
+
 static struct attribute *battery_class_attrs[] = {
 	&class_attr_soc_decimal.attr,
 	&class_attr_shutdown_delay.attr,
@@ -3061,6 +4109,17 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_connector_temp.attr,
 	&class_attr_bypass_charger.attr,
 	&class_attr_usb_icl_override_ma.attr,
+	&class_attr_ignore_vendor_thermal.attr,
+	&class_attr_vendor_thermal_max_level.attr,
+	&class_attr_ignore_vendor_cpu_thermal.attr,
+	&class_attr_cpu_little_override_max_state.attr,
+	&class_attr_cpu_big_override_max_state.attr,
+	&class_attr_skin_override_max_mc.attr,
+	&class_attr_ignore_vendor_gpu_thermal.attr,
+	&class_attr_gpu_override_max_state.attr,
+	&class_attr_ignore_vendor_backlight_thermal.attr,
+	&class_attr_battery_trip_decic.attr,
+	&class_attr_battery_clear_decic.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(battery_class);
@@ -3606,6 +4665,12 @@ static int batt_chg_probe(struct platform_device *pdev)
 	batt_chg->usb_icl_override_ma = 0;
 	g_batt_chg = batt_chg;
 
+	INIT_DELAYED_WORK(&thermal_override_poll_work, thermal_override_poll_work_fn);
+	INIT_WORK(&thermal_override_reapply_work, thermal_override_reapply_work_fn);
+	smp_store_release(&thermal_override_initialized, true);
+	if (thermal_override_poll_needed())
+		schedule_delayed_work(&thermal_override_poll_work, 0);
+
 	rc = batt_init_iio_psy(batt_chg);
 	if (rc < 0) {
 		pr_err("Failed to initialize QG IIO PSY, rc=%d\n", rc);
@@ -3677,12 +4742,18 @@ static int batt_chg_probe(struct platform_device *pdev)
 	return 0;
 
 cleanup:
+	smp_store_release(&thermal_override_initialized, false);
+	cancel_delayed_work_sync(&thermal_override_poll_work);
+	cancel_work_sync(&thermal_override_reapply_work);
 	pr_err("batt_chg probe fail\n");
 	return rc;
 }
 
 static int batt_chg_remove(struct platform_device *pdev)
 {
+	smp_store_release(&thermal_override_initialized, false);
+	cancel_delayed_work_sync(&thermal_override_poll_work);
+	cancel_work_sync(&thermal_override_reapply_work);
 	return 0;
 }
 
@@ -3691,6 +4762,9 @@ static void batt_chg_shutdown(struct platform_device *pdev)
 	struct batt_chg *chg = platform_get_drvdata(pdev);
 
 	pr_err("%s batt_chg_shutdown\n", __func__);
+	smp_store_release(&thermal_override_initialized, false);
+	cancel_delayed_work_sync(&thermal_override_poll_work);
+	cancel_work_sync(&thermal_override_reapply_work);
 	if (!chg)
 		return;
 
