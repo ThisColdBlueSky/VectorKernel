@@ -116,19 +116,26 @@ jobs:
           set -euo pipefail
           mkdir -p llvm
 
-          URL=$(curl -sSL --retry 3 \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/llvm/llvm-project/releases/latest \
-            | jq -r '.assets[] | select(.name | test("^LLVM-[0-9.]+-Linux-X64\\.tar\\.xz$")) | .browser_download_url' \
-            | head -n 1)
+          for attempt in 1 2 3 4 5; do
+            echo "Download attempt $attempt"
+            rm -f llvm.tar.xz
+            if gh release download \
+                 --repo llvm/llvm-project \
+                 --pattern 'LLVM-*-Linux-X64.tar.xz' \
+                 --output llvm.tar.xz \
+               && xz -t llvm.tar.xz; then
+              echo "Download verified"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::LLVM download failed after 5 attempts"
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
-          if [ -z "$URL" ]; then
-            echo "::error::Could not find a Linux-X64 LLVM asset in the latest release"
-            exit 1
-          fi
-
-          echo "Downloading $URL"
-          curl -sSL --retry 3 "$URL" | tar -xJ --strip-components=1 -C llvm
+          tar -xJf llvm.tar.xz --strip-components=1 -C llvm
+          rm llvm.tar.xz
           echo "$GITHUB_WORKSPACE/llvm/bin" >> $GITHUB_PATH
 
           llvm/bin/clang --version
