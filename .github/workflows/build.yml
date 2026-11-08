@@ -1,4 +1,3 @@
-
 name: Build Vector Kernel
 
 on:
@@ -27,7 +26,6 @@ on:
         required: false
         default: false
         type: boolean
-
   push:
     branches:
       - main
@@ -43,70 +41,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-
-  prepare-llvm:
-    name: Prepare LLVM Toolchain
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - name: Download latest LLVM
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          sudo apt-get update
-          sudo apt-get install -y xz-utils curl jq
-
-          mkdir -p llvm
-
-          URL=$(curl -fsSL --retry 5 --retry-all-errors \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/llvm/llvm-project/releases/latest \
-            | jq -r '.assets[] |
-              select(.name | test("^LLVM-[0-9.]+-Linux-X64\\.tar\\.xz$")) |
-              .browser_download_url' | head -n 1)
-
-          if [ -z "$URL" ]; then
-            echo "::error::Could not find LLVM Linux-X64 release"
-            exit 1
-          fi
-
-          echo "Downloading LLVM:"
-          echo "$URL"
-
-          curl -fL --retry 5 --retry-all-errors \
-            --retry-delay 3 \
-            "$URL" -o llvm.tar.xz
-
-          echo "Validating LLVM archive..."
-          xz -t llvm.tar.xz
-
-          echo "Extracting LLVM..."
-          tar -xJf llvm.tar.xz --strip-components=1 -C llvm
-
-          echo "Verifying LLVM binaries..."
-          llvm/bin/clang --version
-          llvm/bin/ld.lld --version
-
-          rm llvm.tar.xz
-
-      - name: Upload LLVM Toolchain
-        uses: actions/upload-artifact@v4
-        with:
-          name: llvm-toolchain
-          path: llvm/
-          retention-days: 1
-          compression-level: 0
-
-
   build:
     name: Build (${{ matrix.edition }}-${{ matrix.variant }})
-    needs: prepare-llvm
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
       matrix:
@@ -114,8 +51,6 @@ jobs:
         edition: [standard, plus]
 
     steps:
-
-
       - name: Determine if variant should run
         id: check_variant
         run: |
@@ -125,27 +60,19 @@ jobs:
           CURRENT_EDITION="${{ matrix.edition }}"
 
           RUN=true
-
-          if [ -n "$TARGET_VARIANT" ] && \
-             [ "$TARGET_VARIANT" != "both" ] && \
-             [ "$TARGET_VARIANT" != "$CURRENT_VARIANT" ]; then
+          if [ -n "$TARGET_VARIANT" ] && [ "$TARGET_VARIANT" != "both" ] && [ "$TARGET_VARIANT" != "$CURRENT_VARIANT" ]; then
+            RUN=false
+          fi
+          if [ -n "$TARGET_EDITION" ] && [ "$TARGET_EDITION" != "both" ] && [ "$TARGET_EDITION" != "$CURRENT_EDITION" ]; then
             RUN=false
           fi
 
-          if [ -n "$TARGET_EDITION" ] && \
-             [ "$TARGET_EDITION" != "both" ] && \
-             [ "$TARGET_EDITION" != "$CURRENT_EDITION" ]; then
-            RUN=false
-          fi
-
-          echo "should_run=$RUN" >> "$GITHUB_OUTPUT"
-
+          echo "should_run=$RUN" >> $GITHUB_OUTPUT
           if [ "$RUN" = "true" ]; then
-            echo "Running $CURRENT_EDITION / $CURRENT_VARIANT"
+            echo "Running build for $CURRENT_EDITION / $CURRENT_VARIANT"
           else
-            echo "Skipping $CURRENT_EDITION / $CURRENT_VARIANT"
+            echo "Skipping $CURRENT_EDITION / $CURRENT_VARIANT (target: variant=$TARGET_VARIANT edition=$TARGET_EDITION)"
           fi
-
 
       - name: Checkout Source Code
         if: steps.check_variant.outputs.should_run == 'true'
@@ -154,150 +81,122 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      
-
       - name: Set up Environment Variables
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
           BUILD_DATE=$(date -u +%Y%m%d)
           BUILD_TIME=$(date -u +%Y%m%d-%H%M)
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
-
-          echo "BUILD_DATE=${BUILD_DATE}" >> "$GITHUB_ENV"
-          echo "BUILD_TIME=${BUILD_TIME}" >> "$GITHUB_ENV"
-          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=${BUILD_DATE}" >> $GITHUB_ENV
+          echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_ENV
+          echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
 
           if [ "${{ matrix.edition }}" = "plus" ]; then
-            echo "DEFCONFIG=vector_defconfig" >> "$GITHUB_ENV"
-            echo "ZIP_PREFIX=Vector-veux-plus" >> "$GITHUB_ENV"
+            echo "DEFCONFIG=vector_defconfig" >> $GITHUB_ENV
+            echo "ZIP_PREFIX=Vector-veux-plus" >> $GITHUB_ENV
           else
-            echo "DEFCONFIG=veux_defconfig" >> "$GITHUB_ENV"
-            echo "ZIP_PREFIX=Vector-veux" >> "$GITHUB_ENV"
+            echo "DEFCONFIG=veux_defconfig" >> $GITHUB_ENV
+            echo "ZIP_PREFIX=Vector-veux" >> $GITHUB_ENV
           fi
-
-
 
       - name: Install Build Dependencies
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
           sudo apt-get update
-
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ccache curl flex \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             git libssl-dev libelf-dev lz4 xz-utils zip python3
 
-      - name: Download Prepared LLVM
+      - name: Download & Set up latest LLVM
         if: steps.check_variant.outputs.should_run == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: llvm-toolchain
-          path: llvm/
-
-      - name: Set up LLVM
-        if: steps.check_variant.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          mkdir -p llvm
 
-          if [ ! -x llvm/bin/clang ] || [ ! -x llvm/bin/ld.lld ]; then
-            echo "::error::LLVM toolchain is missing or corrupted!"
+          URL=$(curl -sSL --retry 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/llvm/llvm-project/releases/latest \
+            | jq -r '.assets[] | select(.name | test("^LLVM-[0-9.]+-Linux-X64\\.tar\\.xz$")) | .browser_download_url' \
+            | head -n 1)
+
+          if [ -z "$URL" ]; then
+            echo "::error::Could not find a Linux-X64 LLVM asset in the latest release"
             exit 1
           fi
 
-          echo "$GITHUB_WORKSPACE/llvm/bin" >> "$GITHUB_PATH"
+          echo "Downloading $URL"
+          curl -sSL --retry 3 "$URL" | tar -xJ --strip-components=1 -C llvm
+          echo "$GITHUB_WORKSPACE/llvm/bin" >> $GITHUB_PATH
 
           llvm/bin/clang --version
           llvm/bin/ld.lld --version
 
-
       - name: Configure Kernel
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
-          set -euo pipefail
-
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
 
           echo "Generating defconfig: ${DEFCONFIG}"
-
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            "${DEFCONFIG}"
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            ${DEFCONFIG}
 
-          echo "Enabling ThinLTO..."
+          echo "Enabling ThinLTO to optimize memory footprint during linking..."
           bash ./scripts/config --file out/.config -e THINLTO
 
           if [ "${{ matrix.variant }}" = "ksu" ]; then
-            echo "Enabling KernelSU..."
-            bash ./scripts/config --file out/.config \
-              -e KSU \
-              -e DEBUG_KERNEL \
-              -e KALLSYMS \
-              -e KALLSYMS_ALL
+            echo "Enabling KernelSU (CONFIG_KSU=y)..."
+            bash ./scripts/config --file out/.config -e KSU -e DEBUG_KERNEL -e KALLSYMS -e KALLSYMS_ALL
           else
-            echo "Disabling KernelSU..."
+            echo "Disabling KernelSU (CONFIG_KSU not set)..."
             bash ./scripts/config --file out/.config -d KSU
           fi
 
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             olddefconfig
-
-      
 
       - name: Compile Kernel & DTB
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
-          set -euo pipefail
-
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
-
           export KBUILD_BUILD_USER="ThisColdBlueSky"
           export KBUILD_BUILD_HOST="github-actions"
 
-          make -j"$(nproc --all)" O=out ARCH=arm64 \
+          make -j$(nproc --all) O=out ARCH=arm64 \
             CC="ccache clang" LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             KCFLAGS="-Wno-error" \
             Image dtbs
 
       - name: Verify Build Outputs
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
-          set -euo pipefail
-
           if [ ! -f out/arch/arm64/boot/Image ]; then
             echo "::error::Kernel Image was not generated!"
             exit 1
           fi
 
-          DTB_PATH=$(find out/arch/arm64/boot/dts \
-            -name "veux.dtb" | head -n 1)
-
+          DTB_PATH=$(find out/arch/arm64/boot/dts -name "veux.dtb" | head -n 1)
           if [ -z "$DTB_PATH" ] || [ ! -f "$DTB_PATH" ]; then
             echo "::error::veux.dtb was not generated!"
             exit 1
           fi
 
           echo "Kernel Image size: $(stat -c%s out/arch/arm64/boot/Image) bytes"
-          echo "Found DTB: $DTB_PATH"
-          echo "DTB size: $(stat -c%s "$DTB_PATH") bytes"
-
-          echo "DTB_PATH=$DTB_PATH" >> "$GITHUB_ENV"
-
-      
+          echo "Found DTB: $DTB_PATH (size: $(stat -c%s "$DTB_PATH") bytes)"
+          echo "DTB_PATH=$DTB_PATH" >> $GITHUB_ENV
 
       - name: Package AnyKernel3 Flashable Zip
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
-          set -euo pipefail
-
           VARIANT="${{ matrix.variant }}"
           EDITION="${{ matrix.edition }}"
 
@@ -308,45 +207,32 @@ jobs:
           fi
 
           PACKAGE_DIR="package_${EDITION}_${VARIANT}"
-
           mkdir -p "$PACKAGE_DIR"
-
           cp -r anykernel/* "$PACKAGE_DIR"/
           cp out/arch/arm64/boot/Image "$PACKAGE_DIR"/Image
           cp "$DTB_PATH" "$PACKAGE_DIR"/dtb
 
-          chmod +x \
-            "$PACKAGE_DIR"/anykernel.sh \
-            "$PACKAGE_DIR"/META-INF/com/google/android/update-binary \
-            "$PACKAGE_DIR"/tools/* 2>/dev/null || true
+          chmod +x "$PACKAGE_DIR"/anykernel.sh \
+                   "$PACKAGE_DIR"/META-INF/com/google/android/update-binary \
+                   "$PACKAGE_DIR"/tools/* 2>/dev/null || true
 
           cd "$PACKAGE_DIR"
-
-          zip -r9 "../${ZIP_NAME}" * \
-            -x ".git*" "README.md"
-
+          zip -r9 "../${ZIP_NAME}" * -x ".git*" "README.md"
           cd ..
 
           sha256sum "${ZIP_NAME}" > "${ZIP_NAME}.sha256"
 
           mkdir -p build_output
-
           cp "${ZIP_NAME}" build_output/
           cp "${ZIP_NAME}.sha256" build_output/
-
-          cp out/arch/arm64/boot/Image \
-            "build_output/Image_${EDITION}_${VARIANT}"
-
-          cp "$DTB_PATH" \
-            "build_output/dtb_${EDITION}_${VARIANT}"
+          cp out/arch/arm64/boot/Image "build_output/Image_${EDITION}_${VARIANT}"
+          cp "$DTB_PATH" "build_output/dtb_${EDITION}_${VARIANT}"
 
           mkdir -p vmlinux_output
-
           if [ -f out/vmlinux ]; then
             echo "Archiving unstripped vmlinux..."
             gzip -c out/vmlinux > vmlinux_output/vmlinux.gz
           fi
-
 
       - name: Upload Build Artifacts
         if: steps.check_variant.outputs.should_run == 'true'
@@ -364,21 +250,18 @@ jobs:
           path: vmlinux_output/*
           retention-days: 7
 
-
   release:
     name: Package & Release
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     if: |
       needs.build.result == 'success' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.create_release == true
 
     steps:
-
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
@@ -394,23 +277,17 @@ jobs:
 
       - name: Prepare Release Assets
         run: |
-          set -euo pipefail
-
           mkdir -p release_assets
-
           BUILD_DATE=$(date -u +%Y%m%d)
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
 
-          find all_artifacts -name "*.zip" \
-            -exec cp {} release_assets/ \;
-
-          find all_artifacts -name "*.sha256" \
-            -exec cp {} release_assets/ \;
+          # Copy individual zips and checksums
+          find all_artifacts -name "*.zip" -exec cp {} release_assets/ \;
+          find all_artifacts -name "*.sha256" -exec cp {} release_assets/ \;
 
           echo "Final release assets:"
           ls -la release_assets/
-
-          echo "TAG_NAME=v${BUILD_DATE}-${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "TAG_NAME=v${BUILD_DATE}-${SHORT_SHA}" >> $GITHUB_ENV
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -424,22 +301,20 @@ jobs:
           files: release_assets/*
           body: |
             ## Vector Kernel for POCO X4 Pro 5G (`veux` / `peux`)
-
+            
             - **Commit:** `${{ github.sha }}`
             - **Branch:** `${{ github.ref_name }}`
             - **Kernel Release:** `5.4.302~Vector`
-
+            
             ### Which one should I download?
-
             - **Plus** builds contain every feature the normal builds have, plus some extra features that might not be suitable for normal users.
             - **If you don't know what any of that means, download the non-plus build.**
-
+            
             ### Included Packages:
-
             **Normal (non-plus):**
             - **`Vector-veux-*-Standard.zip`**: Non-root clean kernel.
             - **`Vector-veux-*-KSU.zip`**: KernelSU root support pre-compiled into `Image`.
-
+            
             **Plus (`vector_defconfig`):**
             - **`Vector-veux-plus-*-Standard.zip`**: Non-root plus kernel.
             - **`Vector-veux-plus-*-KSU.zip`**: Plus kernel with KernelSU pre-compiled into `Image`.
