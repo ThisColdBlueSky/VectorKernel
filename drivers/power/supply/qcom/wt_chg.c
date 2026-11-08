@@ -19,6 +19,8 @@
 #include <linux/iio/consumer.h>
 #include <linux/thermal.h>
 #include <linux/thermal_override.h>
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
 #include "wt_chg_iio.h"
 
 #define MSG_OWNER_BC			32778
@@ -3795,7 +3797,7 @@ static ssize_t ignore_vendor_thermal_store(struct class *c,
 static struct class_attribute class_attr_ignore_vendor_thermal = {
 	.attr = {
 		.name = "ignore_vendor_thermal",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = ignore_vendor_thermal_show,
 	.store = ignore_vendor_thermal_store,
@@ -3822,7 +3824,7 @@ static ssize_t vendor_thermal_max_level_store(struct class *c,
 static struct class_attribute class_attr_vendor_thermal_max_level = {
 	.attr = {
 		.name = "vendor_thermal_max_level",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = vendor_thermal_max_level_show,
 	.store = vendor_thermal_max_level_store,
@@ -3849,7 +3851,7 @@ static ssize_t ignore_vendor_cpu_thermal_store(struct class *c,
 static struct class_attribute class_attr_ignore_vendor_cpu_thermal = {
 	.attr = {
 		.name = "ignore_vendor_cpu_thermal",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = ignore_vendor_cpu_thermal_show,
 	.store = ignore_vendor_cpu_thermal_store,
@@ -3876,7 +3878,7 @@ static ssize_t cpu_little_override_max_state_store(struct class *c,
 static struct class_attribute class_attr_cpu_little_override_max_state = {
 	.attr = {
 		.name = "cpu_little_override_max_state",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = cpu_little_override_max_state_show,
 	.store = cpu_little_override_max_state_store,
@@ -3903,7 +3905,7 @@ static ssize_t cpu_big_override_max_state_store(struct class *c,
 static struct class_attribute class_attr_cpu_big_override_max_state = {
 	.attr = {
 		.name = "cpu_big_override_max_state",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = cpu_big_override_max_state_show,
 	.store = cpu_big_override_max_state_store,
@@ -3930,7 +3932,7 @@ static ssize_t skin_override_max_mc_store(struct class *c,
 static struct class_attribute class_attr_skin_override_max_mc = {
 	.attr = {
 		.name = "skin_override_max_mc",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = skin_override_max_mc_show,
 	.store = skin_override_max_mc_store,
@@ -3957,7 +3959,7 @@ static ssize_t ignore_vendor_gpu_thermal_store(struct class *c,
 static struct class_attribute class_attr_ignore_vendor_gpu_thermal = {
 	.attr = {
 		.name = "ignore_vendor_gpu_thermal",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = ignore_vendor_gpu_thermal_show,
 	.store = ignore_vendor_gpu_thermal_store,
@@ -3984,7 +3986,7 @@ static ssize_t gpu_override_max_state_store(struct class *c,
 static struct class_attribute class_attr_gpu_override_max_state = {
 	.attr = {
 		.name = "gpu_override_max_state",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = gpu_override_max_state_show,
 	.store = gpu_override_max_state_store,
@@ -4011,7 +4013,7 @@ static ssize_t ignore_vendor_backlight_thermal_store(struct class *c,
 static struct class_attribute class_attr_ignore_vendor_backlight_thermal = {
 	.attr = {
 		.name = "ignore_vendor_backlight_thermal",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = ignore_vendor_backlight_thermal_show,
 	.store = ignore_vendor_backlight_thermal_store,
@@ -4038,7 +4040,7 @@ static ssize_t battery_trip_decic_store(struct class *c,
 static struct class_attribute class_attr_battery_trip_decic = {
 	.attr = {
 		.name = "battery_trip_decic",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = battery_trip_decic_show,
 	.store = battery_trip_decic_store,
@@ -4065,10 +4067,67 @@ static ssize_t battery_clear_decic_store(struct class *c,
 static struct class_attribute class_attr_battery_clear_decic = {
 	.attr = {
 		.name = "battery_clear_decic",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.show = battery_clear_decic_show,
 	.store = battery_clear_decic_store,
+};
+
+#define VECTOR_ATTR_RW(_name) \
+static ssize_t vector_##_name##_show(struct kobject *kobj, \
+				     struct kobj_attribute *attr, char *buf) \
+{ \
+	if (!g_batt_chg) \
+		return -ENODEV; \
+	return _name##_show(&g_batt_chg->battery_class, &class_attr_##_name, buf); \
+} \
+static ssize_t vector_##_name##_store(struct kobject *kobj, \
+				      struct kobj_attribute *attr, \
+				      const char *buf, size_t count) \
+{ \
+	if (!g_batt_chg) \
+		return -ENODEV; \
+	return _name##_store(&g_batt_chg->battery_class, &class_attr_##_name, buf, count); \
+} \
+static struct kobj_attribute vector_attr_##_name = { \
+	.attr = { .name = #_name, .mode = 0666 }, \
+	.show = vector_##_name##_show, \
+	.store = vector_##_name##_store, \
+};
+
+VECTOR_ATTR_RW(bypass_charger);
+VECTOR_ATTR_RW(usb_icl_override_ma);
+VECTOR_ATTR_RW(ignore_vendor_thermal);
+VECTOR_ATTR_RW(vendor_thermal_max_level);
+VECTOR_ATTR_RW(ignore_vendor_cpu_thermal);
+VECTOR_ATTR_RW(cpu_little_override_max_state);
+VECTOR_ATTR_RW(cpu_big_override_max_state);
+VECTOR_ATTR_RW(skin_override_max_mc);
+VECTOR_ATTR_RW(ignore_vendor_gpu_thermal);
+VECTOR_ATTR_RW(gpu_override_max_state);
+VECTOR_ATTR_RW(ignore_vendor_backlight_thermal);
+VECTOR_ATTR_RW(battery_trip_decic);
+VECTOR_ATTR_RW(battery_clear_decic);
+
+static struct attribute *vector_attrs[] = {
+	&vector_attr_bypass_charger.attr,
+	&vector_attr_usb_icl_override_ma.attr,
+	&vector_attr_ignore_vendor_thermal.attr,
+	&vector_attr_vendor_thermal_max_level.attr,
+	&vector_attr_ignore_vendor_cpu_thermal.attr,
+	&vector_attr_cpu_little_override_max_state.attr,
+	&vector_attr_cpu_big_override_max_state.attr,
+	&vector_attr_skin_override_max_mc.attr,
+	&vector_attr_ignore_vendor_gpu_thermal.attr,
+	&vector_attr_gpu_override_max_state.attr,
+	&vector_attr_ignore_vendor_backlight_thermal.attr,
+	&vector_attr_battery_trip_decic.attr,
+	&vector_attr_battery_clear_decic.attr,
+	NULL,
+};
+
+static const struct attribute_group vector_attr_group = {
+	.attrs = vector_attrs,
 };
 
 static struct attribute *battery_class_attrs[] = {
@@ -4272,6 +4331,17 @@ static const struct attribute_group *battery_attr_groups[] = {
 	NULL,
 };
 
+static struct kobject *vector_kobj;
+
+static void wt_cleanup_vector_sysfs(void)
+{
+	if (vector_kobj) {
+		sysfs_remove_group(vector_kobj, &vector_attr_group);
+		kobject_put(vector_kobj);
+		vector_kobj = NULL;
+	}
+}
+
 static int wt_init_dev_class(struct batt_chg *chg)
 {
 	int rc = -EINVAL;
@@ -4283,6 +4353,19 @@ static int wt_init_dev_class(struct batt_chg *chg)
 	rc = class_register(&chg->battery_class);
 	if (rc < 0) {
 		pr_err("Failed to create battery_class rc=%d\n", rc);
+		return rc;
+	}
+
+	vector_kobj = kobject_create_and_add("vector", kernel_kobj);
+	if (!vector_kobj) {
+		pr_err("wt_chg: failed to create vector kobject\n");
+	} else {
+		int v_rc = sysfs_create_group(vector_kobj, &vector_attr_group);
+		if (v_rc) {
+			pr_err("wt_chg: failed to create vector attribute group: %d\n", v_rc);
+			kobject_put(vector_kobj);
+			vector_kobj = NULL;
+		}
 	}
 
 	chg->batt_device.class = &chg->battery_class;
@@ -4291,10 +4374,13 @@ static int wt_init_dev_class(struct batt_chg *chg)
 	chg->batt_device.groups = battery_attr_groups;
 	rc = device_register(&chg->batt_device);
 	if (rc < 0) {
-		pr_err("Failed to create battery_class rc=%d\n", rc);
+		pr_err("Failed to create odm_battery rc=%d\n", rc);
+		wt_cleanup_vector_sysfs();
+		class_unregister(&chg->battery_class);
+		return rc;
 	}
 
-	return rc;
+	return 0;
 }
 
 static int batt_node_map(struct batt_chg *chg)
@@ -4745,6 +4831,7 @@ cleanup:
 	smp_store_release(&thermal_override_initialized, false);
 	cancel_delayed_work_sync(&thermal_override_poll_work);
 	cancel_work_sync(&thermal_override_reapply_work);
+	wt_cleanup_vector_sysfs();
 	pr_err("batt_chg probe fail\n");
 	return rc;
 }
@@ -4754,6 +4841,7 @@ static int batt_chg_remove(struct platform_device *pdev)
 	smp_store_release(&thermal_override_initialized, false);
 	cancel_delayed_work_sync(&thermal_override_poll_work);
 	cancel_work_sync(&thermal_override_reapply_work);
+	wt_cleanup_vector_sysfs();
 	return 0;
 }
 
