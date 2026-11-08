@@ -3010,20 +3010,42 @@ LZ4_FORCE_O2
 int LZ4_decompress_safe(const char *source, char *dest, int compressedSize,
 			int maxDecompressedSize)
 {
+	if (unlikely(compressedSize < 0 || maxDecompressedSize < 0))
+		return -EINVAL;
+
+#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
+	return (int)LZ4_arm64_decompress_safe(source, dest,
+					      (size_t)compressedSize,
+					      (size_t)maxDecompressedSize,
+					      false);
+#else
 	return LZ4_decompress_generic(source, dest, compressedSize,
 				      maxDecompressedSize, decode_full_block,
 				      noDict, (BYTE *)dest, NULL, 0);
+#endif
 }
+EXPORT_SYMBOL(LZ4_decompress_safe);
 
 LZ4_FORCE_O2
 int LZ4_decompress_safe_partial(const char *src, char *dst, int compressedSize,
 				int targetOutputSize, int dstCapacity)
 {
 	dstCapacity = MIN(targetOutputSize, dstCapacity);
+	if (unlikely(compressedSize < 0 || dstCapacity < 0))
+		return -EINVAL;
+
+#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
+	return (int)LZ4_arm64_decompress_safe_partial(src, dst,
+						      (size_t)compressedSize,
+						      (size_t)dstCapacity,
+						      false);
+#else
 	return LZ4_decompress_generic(src, dst, compressedSize, dstCapacity,
 				      partial_decode, noDict, (BYTE *)dst, NULL,
 				      0);
+#endif
 }
+EXPORT_SYMBOL(LZ4_decompress_safe_partial);
 
 LZ4_FORCE_O2
 int LZ4_decompress_fast(const char *source, char *dest, int originalSize)
@@ -3032,6 +3054,7 @@ int LZ4_decompress_fast(const char *source, char *dest, int originalSize)
 	return LZ4_decompress_unsafe_generic((const BYTE *)source, (BYTE *)dest,
 					     originalSize, 0, NULL, 0);
 }
+EXPORT_SYMBOL(LZ4_decompress_fast);
 
 /*===== Instantiate a few more decoding cases, used more than once. =====*/
 
@@ -3297,6 +3320,7 @@ LZ4_FORCE_O2 ssize_t LZ4_arm64_decompress_safe_partial(const void *source,
 					outputSize, partial_decode, noDict,
 					(BYTE *)dest, NULL, 0);
 }
+EXPORT_SYMBOL(LZ4_arm64_decompress_safe_partial);
 
 LZ4_FORCE_O2 ssize_t LZ4_arm64_decompress_safe(const void *source, void *dest,
 					       size_t inputSize,
@@ -3322,6 +3346,7 @@ LZ4_FORCE_O2 ssize_t LZ4_arm64_decompress_safe(const void *source, void *dest,
 					outputSize, decode_full_block, noDict,
 					(BYTE *)dest, NULL, 0);
 }
+EXPORT_SYMBOL(LZ4_arm64_decompress_safe);
 
 LZ4_FORCE_O2 int
 LZ4_decompress_fast_continue(LZ4_streamDecode_t *LZ4_streamDecode,
