@@ -65,6 +65,8 @@
 #define BATTERY_VOLTAGET_PRE     3500000
 #define BATTERY_VOLTAGET_OFFSET  20000
 
+#define WT_VBUS_UNPLUG_MV 4000
+
 enum uvdm_state {
 	USBPD_UVDM_DISCONNECT,
 	USBPD_UVDM_CHARGER_VERSION,
@@ -448,13 +450,29 @@ struct batt_chg {
 	int usb_icl_override_ma;
 	struct mutex icl_lock;
 	bool thermal_throttle_active;
+	int charge_stop_pct;
+	int charge_resume_pct;
+	bool limit_hold;
+	int charge_limit_state;
+	int limit_debounce_cnt;
+	int limit_invalid_soc_cnt;
+	struct mutex limit_lock;
+	struct delayed_work charge_limit_work;
+	int limit_raw_cc_soc;
+	int limit_raw_cap;
+	ktime_t last_debounce_sample_time;
 };
 
 struct batt_chg *g_batt_chg;
+static struct kobject *vector_kobj;
 
 bool wt_chg_is_bypass_active(void)
 {
-	return g_batt_chg ? !!READ_ONCE(g_batt_chg->bypass_mode) : false;
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+
+	if (!chg)
+		return false;
+	return !!READ_ONCE(chg->bypass_mode) || !!READ_ONCE(chg->limit_hold);
 }
 EXPORT_SYMBOL(wt_chg_is_bypass_active);
 
@@ -1654,7 +1672,7 @@ static int sw_battery_recharge(struct batt_chg *chg)
 	int r_soc;
 	int en = 0;
 
-	if (READ_ONCE(chg->bypass_mode))
+	if (READ_ONCE(chg->bypass_mode) || READ_ONCE(chg->limit_hold))
 		return 0;
 
 	batt_get_iio_channel(chg, BMS, BATT_QG_CC_SOC, &r_soc);
@@ -2062,7 +2080,7 @@ static int sw_battery_jeita(struct batt_chg *chg)
 		batt_set_iio_channel(chg, MAIN, MAIN_CHAGER_CURRENT, cur);
 	}
 	batt_set_iio_channel(chg, MAIN, MAIN_INPUT_CURRENT_SETTLED, input_cur);
-	if (READ_ONCE(chg->bypass_mode))
+	if (READ_ONCE(chg->bypass_mode) || READ_ONCE(chg->limit_hold))
 		batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, 0);
 	pr_err("temp = %d,input_cur %d curr=%d, en %d, is_pps %d,mtbf_current %d, type %d cv_flag %d , input_limit_flag %d\n",
 		temp, input_cur, cur, en, chg->is_pps_on, chg->mtbf_current, type, chg->cv_flag, chg->input_limit_flag);
@@ -2342,7 +2360,7 @@ static int batt_psy_get_prop(struct power_supply *psy,
 			pval->intval = POWER_SUPPLY_STATUS_FULL;
 		if(chg->usb_temp > 680 && pval->intval == POWER_SUPPLY_STATUS_CHARGING)
 			pval->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-		if (READ_ONCE(chg->bypass_mode))
+		if (READ_ONCE(chg->bypass_mode) || READ_ONCE(chg->limit_hold))
 			pval->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
@@ -2785,6 +2803,295 @@ static int batt_parse_dt(struct batt_chg *chg)
 	return 0;
 };
 
+/*
+ * Notify userspace listeners (such as vectord) via poll/epoll on
+ * /sys/kernel/vector/charge_limit_state when state changes.
+ */
+static void wt_chg_notify_charge_limit_state(void)
+{
+	if (vector_kobj)
+		sysfs_notify(vector_kobj, NULL, "charge_limit_state");
+}
+
+static void wt_chg_set_limit_state_locked(struct batt_chg *chg, int new_state)
+{
+	int old_state = READ_ONCE(chg->charge_limit_state);
+
+	if (old_state != new_state) {
+		WRITE_ONCE(chg->charge_limit_state, new_state);
+		wt_chg_notify_charge_limit_state();
+	}
+}
+
+/*
+ * Checks whether the charging cable is physically connected.
+ * Hardware bus voltage under WT_VBUS_UNPLUG_MV indicates physical disconnect
+ * even if chg->real_type has not yet updated.
+ */
+static bool wt_chg_is_cable_plugged(struct batt_chg *chg)
+{
+	int bq_vbus = 0;
+	int rc;
+
+	if (!chg)
+		return false;
+
+	if (!chg->real_type)
+		return false;
+
+	rc = batt_get_iio_channel(chg, MAIN, MAIN_BUS_VOLTAGE, &bq_vbus);
+	if (rc >= 0 && bq_vbus < WT_VBUS_UNPLUG_MV)
+		return false;
+
+	return true;
+}
+
+/*
+ * Reads SoC from the fuel gauge:
+ * Prioritizes ui_soc to match the Android status bar, with BMS capacity and CC_SOC fallback.
+ * Stores raw readings in chg->limit_raw_cc_soc and chg->limit_raw_cap for logging.
+ * Returns true if valid SoC (1..100) was obtained, false otherwise.
+ */
+static bool wt_chg_get_limit_soc(struct batt_chg *chg, int *soc_pct, int *soc_bp)
+{
+	int r_soc = -1, cap = -1;
+	int rc_rsoc, rc_cap;
+	int pct = -1, bp = -1;
+	bool valid = false;
+
+	if (!chg)
+		return false;
+
+	rc_rsoc = batt_get_iio_channel(chg, BMS, BATT_QG_CC_SOC, &r_soc);
+	rc_cap = batt_get_iio_channel(chg, BMS, BATT_QG_CAPACITY, &cap);
+
+	chg->limit_raw_cc_soc = (rc_rsoc == 0) ? r_soc : -1;
+	chg->limit_raw_cap = (rc_cap == 0) ? cap : -1;
+
+	if (chg->ui_soc > 0 && chg->ui_soc <= 100) {
+		pct = chg->ui_soc;
+		if (rc_rsoc == 0 && r_soc > 0 && r_soc <= 10000 && (r_soc / 100) == chg->ui_soc)
+			bp = r_soc;
+		else
+			bp = chg->ui_soc * 100;
+		valid = true;
+	} else if (rc_cap == 0 && cap > 0 && cap <= 100) {
+		pct = cap;
+		bp = (rc_rsoc == 0 && r_soc > 0 && r_soc <= 10000) ? r_soc : (cap * 100);
+		valid = true;
+	} else if (rc_rsoc == 0 && r_soc > 0 && r_soc <= 10000) {
+		bp = r_soc;
+		pct = r_soc / 100;
+		valid = true;
+	}
+
+	if (valid) {
+		if (soc_pct)
+			*soc_pct = pct;
+		if (soc_bp)
+			*soc_bp = bp;
+	}
+
+	return valid;
+}
+
+/*
+ * Charge limit hysteresis and safety evaluation.
+ * Must be called with chg->limit_lock held.
+ */
+static void wt_chg_evaluate_charge_limit_locked(struct batt_chg *chg)
+{
+	int stop, resume, state;
+	int soc_pct = -1, soc_bp = -1;
+	bool valid;
+
+	if (READ_ONCE(chg->shutdown_flag))
+		return;
+
+	stop = READ_ONCE(chg->charge_stop_pct);
+	resume = READ_ONCE(chg->charge_resume_pct);
+	state = READ_ONCE(chg->charge_limit_state);
+
+	/* Feature disabled (stop == 0 or 100): release hold immediately and reset resume */
+	if (stop == 0 || stop == 100) {
+		wt_chg_set_limit_state_locked(chg, 0);
+		WRITE_ONCE(chg->charge_stop_pct, 0);
+		WRITE_ONCE(chg->charge_resume_pct, 0);
+		chg->limit_debounce_cnt = 0;
+		chg->limit_invalid_soc_cnt = 0;
+		if (chg->limit_hold) {
+			chg->limit_hold = false;
+			if (!READ_ONCE(chg->bypass_mode) && chg->real_type && !chg->high_temp_flag)
+				sw_battery_jeita(chg);
+			power_supply_changed(chg->batt_psy);
+			pr_info("wt_chg: charge limit disabled, hold released (ui_soc=%d%%, cap=%d%%, cc_soc=%d.%02d%%)\n",
+				chg->ui_soc, chg->limit_raw_cap,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc / 100 : 0,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc % 100 : 0);
+		}
+		return;
+	}
+
+	/* Case 4: Unplug: clear limit_hold and reset state to charging */
+	if (!wt_chg_is_cable_plugged(chg)) {
+		wt_chg_set_limit_state_locked(chg, 1);
+		chg->limit_debounce_cnt = 0;
+		chg->limit_invalid_soc_cnt = 0;
+		if (chg->limit_hold) {
+			chg->limit_hold = false;
+			power_supply_changed(chg->batt_psy);
+			pr_info("wt_chg: unplugged, charge limit hold cleared (ui_soc=%d%%, cap=%d%%, cc_soc=%d.%02d%%)\n",
+				chg->ui_soc, chg->limit_raw_cap,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc / 100 : 0,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc % 100 : 0);
+		}
+		return;
+	}
+
+	/* Read capacity via unified helper */
+	valid = wt_chg_get_limit_soc(chg, &soc_pct, &soc_bp);
+
+	/*
+	 * Case 6: Invalid, zero or out-of-range capacity read: never change state
+	 * on that sample. If capacity is invalid for N (3) consecutive evaluations
+	 * while holding, release the hold (fail safe toward charging).
+	 */
+	if (!valid) {
+		chg->limit_debounce_cnt = 0;
+		if (state == 2 /* HOLDING */) {
+			chg->limit_invalid_soc_cnt++;
+			if (chg->limit_invalid_soc_cnt >= 3) {
+				pr_warn("wt_chg: invalid capacity read %d consecutive times while holding; failing safe to charging (ui_soc=%d%%, cap=%d%%, cc_soc=%d.%02d%%)\n",
+					chg->limit_invalid_soc_cnt, chg->ui_soc, chg->limit_raw_cap,
+					chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc / 100 : 0,
+					chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc % 100 : 0);
+				wt_chg_set_limit_state_locked(chg, 1);
+				chg->limit_hold = false;
+				chg->limit_invalid_soc_cnt = 0;
+				if (!READ_ONCE(chg->bypass_mode) && chg->real_type && !chg->high_temp_flag)
+					sw_battery_jeita(chg);
+				power_supply_changed(chg->batt_psy);
+			}
+		}
+		return;
+	}
+
+	/* Valid sample: clear invalid read counter */
+	chg->limit_invalid_soc_cnt = 0;
+
+	/*
+	 * Case 7: soc <= 15: force-release limit_hold regardless of config,
+	 * and never enter a hold below that.
+	 */
+	if (soc_pct <= 15) {
+		chg->limit_debounce_cnt = 0;
+		if (state == 2 || chg->limit_hold) {
+			pr_warn("wt_chg: soc %d%% <= 15%%: force-releasing charge limit hold (ui_soc=%d%%, cap=%d%%, cc_soc=%d.%02d%%)\n",
+				soc_pct, chg->ui_soc, chg->limit_raw_cap,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc / 100 : 0,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc % 100 : 0);
+			wt_chg_set_limit_state_locked(chg, 1);
+			chg->limit_hold = false;
+			if (!READ_ONCE(chg->bypass_mode) && chg->real_type && !chg->high_temp_flag)
+				sw_battery_jeita(chg);
+			power_supply_changed(chg->batt_psy);
+		}
+		return;
+	}
+
+	/*
+	 * Hysteresis and 2-sample debounce state machine:
+	 * Compare whole percents on displayed value (soc_pct).
+	 * Enforces >= 400ms between sample 1 and sample 2.
+	 * State 1 = CHARGING, State 2 = HOLDING.
+	 */
+	if (state == 2 /* HOLDING */) {
+		/* While holding: soc_pct <= resume -> resume charging after 2 samples */
+		if (soc_pct <= resume) {
+			ktime_t now = ktime_get();
+			if (chg->limit_debounce_cnt == 0) {
+				chg->limit_debounce_cnt = 1;
+				chg->last_debounce_sample_time = now;
+				pr_info("wt_chg: charge limit resume condition met (soc=%d%% [%d.%02d%%] <= %d%%, count=1/2)\n",
+					soc_pct, soc_bp / 100, soc_bp % 100, resume);
+			} else if (ktime_ms_delta(now, chg->last_debounce_sample_time) >= 400) {
+				chg->limit_debounce_cnt = 2;
+				chg->last_debounce_sample_time = now;
+				wt_chg_set_limit_state_locked(chg, 1);
+				chg->limit_hold = false;
+				chg->limit_debounce_cnt = 0;
+				if (!READ_ONCE(chg->bypass_mode) && chg->real_type && !chg->high_temp_flag)
+					sw_battery_jeita(chg);
+				power_supply_changed(chg->batt_psy);
+				pr_info("wt_chg: charge limit resumed charging (ui_soc=%d%%, cap=%d%%, cc_soc=%d.%02d%%, resume=%d%%)\n",
+					chg->ui_soc, chg->limit_raw_cap,
+					chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc / 100 : 0,
+					chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc % 100 : 0,
+					resume);
+			}
+		} else {
+			chg->limit_debounce_cnt = 0;
+		}
+	} else {
+		/* In CHARGING state (or start): soc_pct >= stop -> hold after 2 samples */
+		if (state != 1)
+			wt_chg_set_limit_state_locked(chg, 1);
+
+		if (soc_pct >= stop) {
+			ktime_t now = ktime_get();
+			if (chg->limit_debounce_cnt == 0) {
+				chg->limit_debounce_cnt = 1;
+				chg->last_debounce_sample_time = now;
+				pr_info("wt_chg: charge limit stop condition met (soc=%d%% [%d.%02d%%] >= %d%%, count=1/2)\n",
+					soc_pct, soc_bp / 100, soc_bp % 100, stop);
+			} else if (ktime_ms_delta(now, chg->last_debounce_sample_time) >= 400) {
+				chg->limit_debounce_cnt = 2;
+				chg->last_debounce_sample_time = now;
+				wt_chg_set_limit_state_locked(chg, 2);
+				chg->limit_hold = true;
+				chg->limit_debounce_cnt = 0;
+				batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, 0);
+				power_supply_changed(chg->batt_psy);
+				pr_info("wt_chg: charge limit engaged hold (ui_soc=%d%%, cap=%d%%, cc_soc=%d.%02d%%, stop=%d%%)\n",
+					chg->ui_soc, chg->limit_raw_cap,
+					chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc / 100 : 0,
+					chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc % 100 : 0,
+					stop);
+			}
+		} else {
+			chg->limit_debounce_cnt = 0;
+		}
+	}
+}
+
+/*
+ * Dedicated non-deferrable work for charge limit polling and debouncing.
+ * Ensures ~2s regular polling and 500ms debounce confirmation even in suspend/idle.
+ */
+static void wt_chg_charge_limit_work_fn(struct work_struct *work)
+{
+	struct batt_chg *chg = container_of(work, struct batt_chg, charge_limit_work.work);
+	int stop, interval_ms;
+
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return;
+
+	mutex_lock(&chg->limit_lock);
+	if (READ_ONCE(chg->shutdown_flag)) {
+		mutex_unlock(&chg->limit_lock);
+		return;
+	}
+
+	wt_chg_evaluate_charge_limit_locked(chg);
+
+	stop = READ_ONCE(chg->charge_stop_pct);
+	if (stop > 0 && stop < 100 && !READ_ONCE(chg->shutdown_flag) && wt_chg_is_cable_plugged(chg)) {
+		interval_ms = (chg->limit_debounce_cnt > 0) ? 500 : 2000;
+		schedule_delayed_work(&chg->charge_limit_work, msecs_to_jiffies(interval_ms));
+	}
+	mutex_unlock(&chg->limit_lock);
+}
+
 static void batt_chg_main(struct work_struct *work)
 {
 	int val = 0;
@@ -2846,7 +3153,7 @@ static void batt_chg_main(struct work_struct *work)
 			schedule_delayed_work(&chg->usb_type_work, msecs_to_jiffies(1000));
 		}
 
-		if(chg->vbus_voltage < 4000)
+		if(chg->vbus_voltage < WT_VBUS_UNPLUG_MV)
 			chg->vbus_cnt++;
 		else
 			chg->vbus_cnt = 0;
@@ -2864,17 +3171,22 @@ static void batt_chg_main(struct work_struct *work)
 			mutex_lock(&chg->bypass_lock);
 			if (READ_ONCE(chg->bypass_mode)) {
 				WRITE_ONCE(chg->bypass_mode, 0);
-				batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, 1);
+				if (!READ_ONCE(chg->limit_hold) && chg->real_type && !chg->high_temp_flag)
+					batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, 1);
 				pr_warn("wt_chg: battery low (%d%% < 10%%), bypass auto-cleared\n", soc);
 			}
 			mutex_unlock(&chg->bypass_lock);
 		}
+		if (!READ_ONCE(chg->shutdown_flag) && READ_ONCE(chg->charge_stop_pct) > 0 && !delayed_work_pending(&chg->charge_limit_work))
+			schedule_delayed_work(&chg->charge_limit_work, 0);
 		sw_battery_jeita(chg);
 		sw_battery_set_cv(chg);
 		if (chg->real_type == POWER_SUPPLY_TYPE_USB || chg->real_type == POWER_SUPPLY_TYPE_USB_CDP)
 			sw_battery_recharge(chg);
 		chg->power_supply_count = 0;
 		power_supply_changed(chg->usb_psy);
+		if (chg->shutdown_flag)
+			return;
 		if(chg->is_pps_on) {
 			if (chg->start_cnt <= 60)
 				time = 1000;
@@ -2908,14 +3220,20 @@ static void batt_chg_main(struct work_struct *work)
 			chg->wakeup_flag = 0;
 			pr_err("wt workup relax\n");
 		}
+		if (!READ_ONCE(chg->shutdown_flag) &&
+		    (READ_ONCE(chg->limit_hold) || READ_ONCE(chg->charge_limit_state) == 2)) {
+			cancel_delayed_work(&chg->charge_limit_work);
+			schedule_delayed_work(&chg->charge_limit_work, 0);
+		}
 		if (READ_ONCE(chg->bypass_mode)) {
 			int bq_vbus = 0;
 			int rc = batt_get_iio_channel(chg, MAIN, MAIN_BUS_VOLTAGE, &bq_vbus);
-			if (rc >= 0 && bq_vbus < 4000) {
+			if (rc >= 0 && bq_vbus < WT_VBUS_UNPLUG_MV) {
 				mutex_lock(&chg->bypass_lock);
 				if (READ_ONCE(chg->bypass_mode)) {
 					WRITE_ONCE(chg->bypass_mode, 0);
-					batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, 1);
+					if (!READ_ONCE(chg->limit_hold) && chg->real_type && !chg->high_temp_flag)
+						batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, 1);
 					pr_info("wt_chg: cable unplugged (bq_vbus=%d mV), bypass auto-cleared\n",
 						bq_vbus);
 				}
@@ -2925,7 +3243,7 @@ static void batt_chg_main(struct work_struct *work)
 		if (READ_ONCE(chg->usb_icl_override_ma)) {
 			int bq_vbus = 0;
 			int rc = batt_get_iio_channel(chg, MAIN, MAIN_BUS_VOLTAGE, &bq_vbus);
-			if (rc >= 0 && bq_vbus < 4000) {
+			if (rc >= 0 && bq_vbus < WT_VBUS_UNPLUG_MV) {
 				mutex_lock(&chg->icl_lock);
 				if (READ_ONCE(chg->usb_icl_override_ma)) {
 					WRITE_ONCE(chg->usb_icl_override_ma, 0);
@@ -4073,27 +4391,335 @@ static struct class_attribute class_attr_battery_clear_decic = {
 	.store = battery_clear_decic_store,
 };
 
+static int parse_next_int(const char **str_ptr, int *val)
+{
+	const char *p = *str_ptr;
+	char token[16];
+	size_t len = 0;
+	int parsed;
+
+	while (*p == ' ' || *p == '\t')
+		p++;
+
+	if (*p == '\0' || *p == '\n' || *p == '\r')
+		return -EINVAL;
+
+	if (*p == '-')
+		return -EINVAL;
+
+	while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+		if (len >= sizeof(token) - 1)
+			return -EINVAL;
+		token[len++] = *p++;
+	}
+	token[len] = '\0';
+
+	if (kstrtoint(token, 10, &parsed) < 0)
+		return -EINVAL;
+
+	if (parsed < 0 || parsed > 100)
+		return -EINVAL;
+
+	*str_ptr = p;
+	*val = parsed;
+	return 0;
+}
+
+static bool is_trailing_clean(const char *p)
+{
+	while (*p) {
+		if (*p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+			return false;
+		p++;
+	}
+	return true;
+}
+
+static int wt_chg_apply_limits_locked(struct batt_chg *chg, int new_stop, int new_resume)
+{
+	/* Disable path: writing 0 or 100 stores 0 (reads back 0/0) */
+	if (new_stop == 0 || new_stop == 100) {
+		WRITE_ONCE(chg->charge_stop_pct, 0);
+		WRITE_ONCE(chg->charge_resume_pct, 0);
+		wt_chg_set_limit_state_locked(chg, 0);
+		chg->limit_debounce_cnt = 0;
+		chg->limit_invalid_soc_cnt = 0;
+		if (chg->limit_hold) {
+			chg->limit_hold = false;
+			if (!READ_ONCE(chg->bypass_mode) && chg->real_type && !chg->high_temp_flag)
+				sw_battery_jeita(chg);
+			power_supply_changed(chg->batt_psy);
+			pr_info("wt_chg: charge limit disabled, hold released (ui_soc=%d%%, cap=%d%%, cc_soc=%d.%02d%%)\n",
+				chg->ui_soc, chg->limit_raw_cap,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc / 100 : 0,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc % 100 : 0);
+		}
+		cancel_delayed_work(&chg->charge_limit_work);
+		return 0;
+	}
+
+	/* Range & relationship validation */
+	if (new_stop < 50 || new_stop > 99)
+		return -EINVAL;
+
+	if (new_resume < 20 || new_resume >= new_stop || (new_stop - new_resume) < 2)
+		return -EINVAL;
+
+	WRITE_ONCE(chg->charge_stop_pct, new_stop);
+	WRITE_ONCE(chg->charge_resume_pct, new_resume);
+
+	/*
+	 * Case 3: Thresholds changed while holding or charging.
+	 * If already holding and current SoC is still >= new_stop, maintain hold
+	 * seamlessly without dropping PPS or pulsing bypass.
+	 * Otherwise, release hold and transition to charging.
+	 */
+	if (chg->limit_hold) {
+		int cur_soc_pct = -1, cur_soc_bp = -1;
+		bool valid = wt_chg_get_limit_soc(chg, &cur_soc_pct, &cur_soc_bp);
+
+		if (valid && cur_soc_pct >= new_stop) {
+			wt_chg_set_limit_state_locked(chg, 2);
+			chg->limit_debounce_cnt = 0;
+			pr_info("wt_chg: charge limit thresholds updated (%d/%d), maintaining hold (ui_soc=%d%%, cap=%d%%, cc_soc=%d.%02d%%)\n",
+				new_stop, new_resume, chg->ui_soc, chg->limit_raw_cap,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc / 100 : 0,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc % 100 : 0);
+		} else {
+			chg->limit_hold = false;
+			wt_chg_set_limit_state_locked(chg, 1);
+			chg->limit_debounce_cnt = 0;
+			if (!READ_ONCE(chg->bypass_mode) && chg->real_type && !chg->high_temp_flag)
+				sw_battery_jeita(chg);
+			power_supply_changed(chg->batt_psy);
+			pr_info("wt_chg: charge limit thresholds updated (%d/%d), resuming charging (ui_soc=%d%%, cap=%d%%, cc_soc=%d.%02d%%)\n",
+				new_stop, new_resume, chg->ui_soc, chg->limit_raw_cap,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc / 100 : 0,
+				chg->limit_raw_cc_soc > 0 ? chg->limit_raw_cc_soc % 100 : 0);
+		}
+	} else {
+		wt_chg_set_limit_state_locked(chg, 1);
+		chg->limit_debounce_cnt = 0;
+	}
+
+	chg->limit_invalid_soc_cnt = 0;
+
+	/* Perform sample 1 immediately */
+	wt_chg_evaluate_charge_limit_locked(chg);
+
+	/* Reschedule non-deferrable work queue for sample 2 or regular polling */
+	cancel_delayed_work(&chg->charge_limit_work);
+	if (!READ_ONCE(chg->shutdown_flag) && wt_chg_is_cable_plugged(chg)) {
+		int interval_ms = (chg->limit_debounce_cnt > 0) ? 500 : 2000;
+		schedule_delayed_work(&chg->charge_limit_work, msecs_to_jiffies(interval_ms));
+	}
+	return 0;
+}
+
+static ssize_t charge_stop_pct_show(struct class *c,
+				    struct class_attribute *attr, char *buf)
+{
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+
+	if (!chg)
+		return -ENODEV;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(chg->charge_stop_pct));
+}
+
+static ssize_t charge_stop_pct_store(struct class *c,
+				     struct class_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+	const char *ptr = buf;
+	int val1 = -1, val2 = -1;
+	int rc, stop, resume;
+	bool has_second = false;
+
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return -ENODEV;
+
+	rc = parse_next_int(&ptr, &val1);
+	if (rc < 0)
+		return -EINVAL;
+
+	while (*ptr == ' ' || *ptr == '\t')
+		ptr++;
+
+	if (*ptr != '\0' && *ptr != '\n' && *ptr != '\r') {
+		rc = parse_next_int(&ptr, &val2);
+		if (rc < 0)
+			return -EINVAL;
+		has_second = true;
+	}
+
+	if (!is_trailing_clean(ptr))
+		return -EINVAL;
+
+	mutex_lock(&chg->limit_lock);
+	if (READ_ONCE(chg->shutdown_flag)) {
+		mutex_unlock(&chg->limit_lock);
+		return -ENODEV;
+	}
+
+	stop = val1;
+	if (has_second) {
+		resume = val2;
+	} else if (stop == 0 || stop == 100) {
+		resume = 0;
+	} else {
+		int cur_resume = READ_ONCE(chg->charge_resume_pct);
+		resume = (cur_resume == 0) ? max(20, stop - 5) : cur_resume;
+	}
+
+	rc = wt_chg_apply_limits_locked(chg, stop, resume);
+	mutex_unlock(&chg->limit_lock);
+
+	return rc < 0 ? rc : count;
+}
+static struct class_attribute class_attr_charge_stop_pct = {
+	.attr = {
+		.name = "charge_stop_pct",
+		.mode = 0644,
+	},
+	.show = charge_stop_pct_show,
+	.store = charge_stop_pct_store,
+};
+
+static ssize_t charge_resume_pct_show(struct class *c,
+				      struct class_attribute *attr, char *buf)
+{
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+
+	if (!chg)
+		return -ENODEV;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(chg->charge_resume_pct));
+}
+
+static ssize_t charge_resume_pct_store(struct class *c,
+				       struct class_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+	const char *ptr = buf;
+	int val1 = -1, val2 = -1;
+	int rc, stop, resume;
+	bool has_second = false;
+
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return -ENODEV;
+
+	rc = parse_next_int(&ptr, &val1);
+	if (rc < 0)
+		return -EINVAL;
+
+	while (*ptr == ' ' || *ptr == '\t')
+		ptr++;
+
+	if (*ptr != '\0' && *ptr != '\n' && *ptr != '\r') {
+		rc = parse_next_int(&ptr, &val2);
+		if (rc < 0)
+			return -EINVAL;
+		has_second = true;
+	}
+
+	if (!is_trailing_clean(ptr))
+		return -EINVAL;
+
+	mutex_lock(&chg->limit_lock);
+	if (READ_ONCE(chg->shutdown_flag)) {
+		mutex_unlock(&chg->limit_lock);
+		return -ENODEV;
+	}
+
+	if (has_second) {
+		stop = val1;
+		resume = val2;
+	} else {
+		stop = READ_ONCE(chg->charge_stop_pct);
+		/* Single write to resume node cannot enable feature if disabled */
+		if (stop == 0 || stop == 100) {
+			mutex_unlock(&chg->limit_lock);
+			return -EINVAL;
+		}
+		resume = val1;
+	}
+
+	rc = wt_chg_apply_limits_locked(chg, stop, resume);
+	mutex_unlock(&chg->limit_lock);
+
+	return rc < 0 ? rc : count;
+}
+static struct class_attribute class_attr_charge_resume_pct = {
+	.attr = {
+		.name = "charge_resume_pct",
+		.mode = 0644,
+	},
+	.show = charge_resume_pct_show,
+	.store = charge_resume_pct_store,
+};
+
+static ssize_t charge_limit_state_show(struct class *c,
+				       struct class_attribute *attr, char *buf)
+{
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+
+	if (!chg)
+		return -ENODEV;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(chg->charge_limit_state));
+}
+static struct class_attribute class_attr_charge_limit_state = {
+	.attr = {
+		.name = "charge_limit_state",
+		.mode = 0444,
+	},
+	.show = charge_limit_state_show,
+};
+
+#define VECTOR_ATTR_RO(_name) \
+static ssize_t vector_##_name##_show(struct kobject *kobj, \
+				     struct kobj_attribute *attr, char *buf) \
+{ \
+	struct batt_chg *chg = READ_ONCE(g_batt_chg); \
+	if (!chg) \
+		return -ENODEV; \
+	return _name##_show(&chg->battery_class, &class_attr_##_name, buf); \
+} \
+static struct kobj_attribute vector_attr_##_name = { \
+	.attr = { .name = #_name, .mode = 0444 }, \
+	.show = vector_##_name##_show, \
+};
+
 #define VECTOR_ATTR_RW(_name) \
 static ssize_t vector_##_name##_show(struct kobject *kobj, \
 				     struct kobj_attribute *attr, char *buf) \
 { \
-	if (!g_batt_chg) \
+	struct batt_chg *chg = READ_ONCE(g_batt_chg); \
+	if (!chg) \
 		return -ENODEV; \
-	return _name##_show(&g_batt_chg->battery_class, &class_attr_##_name, buf); \
+	return _name##_show(&chg->battery_class, &class_attr_##_name, buf); \
 } \
 static ssize_t vector_##_name##_store(struct kobject *kobj, \
 				      struct kobj_attribute *attr, \
 				      const char *buf, size_t count) \
 { \
-	if (!g_batt_chg) \
+	struct batt_chg *chg = READ_ONCE(g_batt_chg); \
+	if (!chg) \
 		return -ENODEV; \
-	return _name##_store(&g_batt_chg->battery_class, &class_attr_##_name, buf, count); \
+	return _name##_store(&chg->battery_class, &class_attr_##_name, buf, count); \
 } \
 static struct kobj_attribute vector_attr_##_name = { \
 	.attr = { .name = #_name, .mode = 0666 }, \
 	.show = vector_##_name##_show, \
 	.store = vector_##_name##_store, \
 };
+
+VECTOR_ATTR_RW(charge_stop_pct);
+VECTOR_ATTR_RW(charge_resume_pct);
+VECTOR_ATTR_RO(charge_limit_state);
 
 VECTOR_ATTR_RW(bypass_charger);
 VECTOR_ATTR_RW(usb_icl_override_ma);
@@ -4110,6 +4736,9 @@ VECTOR_ATTR_RW(battery_trip_decic);
 VECTOR_ATTR_RW(battery_clear_decic);
 
 static struct attribute *vector_attrs[] = {
+	&vector_attr_charge_stop_pct.attr,
+	&vector_attr_charge_resume_pct.attr,
+	&vector_attr_charge_limit_state.attr,
 	&vector_attr_bypass_charger.attr,
 	&vector_attr_usb_icl_override_ma.attr,
 	&vector_attr_ignore_vendor_thermal.attr,
@@ -4179,6 +4808,9 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_ignore_vendor_backlight_thermal.attr,
 	&class_attr_battery_trip_decic.attr,
 	&class_attr_battery_clear_decic.attr,
+	&class_attr_charge_stop_pct.attr,
+	&class_attr_charge_resume_pct.attr,
+	&class_attr_charge_limit_state.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(battery_class);
@@ -4330,8 +4962,6 @@ static const struct attribute_group *battery_attr_groups[] = {
 	&battery_attr_group,
 	NULL,
 };
-
-static struct kobject *vector_kobj;
 
 static void wt_cleanup_vector_sysfs(void)
 {
@@ -4749,6 +5379,17 @@ static int batt_chg_probe(struct platform_device *pdev)
 	batt_chg->bypass_mode = 0;
 	mutex_init(&batt_chg->icl_lock);
 	batt_chg->usb_icl_override_ma = 0;
+	mutex_init(&batt_chg->limit_lock);
+	batt_chg->charge_stop_pct = 0;
+	batt_chg->charge_resume_pct = 0;
+	batt_chg->limit_hold = false;
+	batt_chg->charge_limit_state = 0;
+	batt_chg->limit_debounce_cnt = 0;
+	batt_chg->limit_invalid_soc_cnt = 0;
+	batt_chg->limit_raw_cc_soc = -1;
+	batt_chg->limit_raw_cap = -1;
+	batt_chg->last_debounce_sample_time = 0;
+	INIT_DELAYED_WORK(&batt_chg->charge_limit_work, wt_chg_charge_limit_work_fn);
 	g_batt_chg = batt_chg;
 
 	INIT_DELAYED_WORK(&thermal_override_poll_work, thermal_override_poll_work_fn);
@@ -4778,13 +5419,13 @@ static int batt_chg_probe(struct platform_device *pdev)
 	rc = batt_init_config(batt_chg);
 	if (rc < 0) {
 		pr_err("Couldn't parse device tree rc=%d\n", rc);
-		return rc;
+		goto cleanup;
 	}
 
 	rc = batt_node_map(batt_chg);
 	if (rc < 0) {
 		pr_err("Couldn't parse device tree rc=%d\n", rc);
-		return rc;
+		goto cleanup;
 	}
 
 	platform_set_drvdata(pdev, batt_chg);
@@ -4831,6 +5472,8 @@ cleanup:
 	smp_store_release(&thermal_override_initialized, false);
 	cancel_delayed_work_sync(&thermal_override_poll_work);
 	cancel_work_sync(&thermal_override_reapply_work);
+	if (batt_chg)
+		cancel_delayed_work_sync(&batt_chg->charge_limit_work);
 	wt_cleanup_vector_sysfs();
 	pr_err("batt_chg probe fail\n");
 	return rc;
@@ -4838,9 +5481,13 @@ cleanup:
 
 static int batt_chg_remove(struct platform_device *pdev)
 {
+	struct batt_chg *chg = platform_get_drvdata(pdev);
+
 	smp_store_release(&thermal_override_initialized, false);
 	cancel_delayed_work_sync(&thermal_override_poll_work);
 	cancel_work_sync(&thermal_override_reapply_work);
+	if (chg)
+		cancel_delayed_work_sync(&chg->charge_limit_work);
 	wt_cleanup_vector_sysfs();
 	return 0;
 }
@@ -4856,6 +5503,7 @@ static void batt_chg_shutdown(struct platform_device *pdev)
 	if (!chg)
 		return;
 
+	cancel_delayed_work_sync(&chg->charge_limit_work);
 	chg->shutdown_flag = true;
 
 	return;
