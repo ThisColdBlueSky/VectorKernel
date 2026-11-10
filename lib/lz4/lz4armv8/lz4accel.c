@@ -31,6 +31,7 @@ int lz4_decompress_asm_select(uint8_t **dst_ptr, uint8_t *dst_begin,
 
 	switch(read_cpuid_part_number()) {
 	case ARM_CPU_PART_CORTEX_A53:
+	case ARM_CPU_PART_CORTEX_A55:
 		lz4_decompress_asm_fn[i] = _lz4_decompress_asm_noprfm;
 		return _lz4_decompress_asm_noprfm(dst_ptr, dst_begin, dst_end,
 						  src_ptr, src_end, dip);
