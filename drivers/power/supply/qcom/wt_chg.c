@@ -820,14 +820,14 @@ int get_prop_batt_health(struct batt_chg *chg, union power_supply_propval *val)
 
 /*
  * Runtime switches for vendor thermal throttle control:
- * ignore_vendor_thermal:
- *   1 = ignore vendor thermal daemon throttle when safe (default)
- *   0 = stock behavior (always enforce vendor thermal throttle)
+ * ignore_vendor_charging_thermal:
+ *   1 = ignore vendor thermal daemon charging throttle when safe
+ *   0 = stock behavior (always enforce vendor thermal throttle; default)
  * vendor_thermal_max_level:
  *   Max effective thermal mitigation level allowed when battery is safe (default: 18 = 3500mA)
  * ignore_vendor_cpu_thermal:
  *   1 = ignore vendor thermal CPU frequency caps when safe
- *   0 = stock behavior (always enforce vendor CPU frequency caps)
+ *   0 = stock behavior (always enforce vendor CPU frequency caps; default)
  * cpu_little_override_max_state:
  *   Max cooling state floor for Little cores when override active (default: 0 -> no cap / 1.80GHz)
  * cpu_big_override_max_state:
@@ -835,7 +835,7 @@ int get_prop_batt_health(struct batt_chg *chg, union power_supply_propval *val)
  * skin_override_max_mc:
  *   Chassis skin temp backstop in millidegC (default: 0 = disabled; clamp 45000-60000 with 2000mC hysteresis)
  */
-static int ignore_vendor_thermal = 1;
+static int ignore_vendor_charging_thermal = 0;
 static int vendor_thermal_max_level = 18;
 static int ignore_vendor_cpu_thermal = 0;
 static unsigned int cpu_little_override_max_state = 0;
@@ -899,12 +899,12 @@ void vendor_thermal_reapply(void)
 }
 EXPORT_SYMBOL_GPL(vendor_thermal_reapply);
 
-static void set_ignore_vendor_thermal_val(int val)
+static void set_ignore_vendor_charging_thermal_val(int val)
 {
 	struct batt_chg *chg;
 
-	WRITE_ONCE(ignore_vendor_thermal, !!val);
-	pr_info("wt_chg: ignore_vendor_thermal set to %d\n", !!val);
+	WRITE_ONCE(ignore_vendor_charging_thermal, !!val);
+	pr_info("wt_chg: ignore_vendor_charging_thermal set to %d\n", !!val);
 
 	if (smp_load_acquire(&thermal_override_initialized)) {
 		if (thermal_override_poll_needed())
@@ -920,7 +920,7 @@ static void set_ignore_vendor_thermal_val(int val)
 	}
 }
 
-static int param_set_ignore_vendor_thermal(const char *val, const struct kernel_param *kp)
+static int param_set_ignore_vendor_charging_thermal(const char *val, const struct kernel_param *kp)
 {
 	int ret, num;
 
@@ -928,16 +928,20 @@ static int param_set_ignore_vendor_thermal(const char *val, const struct kernel_
 	if (ret)
 		return ret;
 
-	set_ignore_vendor_thermal_val(num);
+	set_ignore_vendor_charging_thermal_val(num);
 	return 0;
 }
 
-static const struct kernel_param_ops ignore_vendor_thermal_param_ops = {
-	.set = param_set_ignore_vendor_thermal,
+static const struct kernel_param_ops ignore_vendor_charging_thermal_param_ops = {
+	.set = param_set_ignore_vendor_charging_thermal,
 	.get = param_get_int,
 };
-module_param_cb(ignore_vendor_thermal, &ignore_vendor_thermal_param_ops, &ignore_vendor_thermal, 0644);
-MODULE_PARM_DESC(ignore_vendor_thermal, "Master switch: ignore vendor thermal mitigation when battery is safe (removes fast-charging caps; skin backstop disabled by default)");
+module_param_cb(ignore_vendor_charging_thermal, &ignore_vendor_charging_thermal_param_ops, &ignore_vendor_charging_thermal, 0644);
+MODULE_PARM_DESC(ignore_vendor_charging_thermal, "Ignore vendor charging thermal mitigation when battery is safe (removes fast-charging caps; skin backstop disabled by default)");
+
+/* Backwards-compatible alias */
+module_param_cb(ignore_vendor_thermal, &ignore_vendor_charging_thermal_param_ops, &ignore_vendor_charging_thermal, 0644);
+MODULE_PARM_DESC(ignore_vendor_thermal, "Deprecated alias for ignore_vendor_charging_thermal");
 
 static void set_vendor_thermal_max_level_val(int val)
 {
@@ -1407,7 +1411,7 @@ static void thermal_override_poll_work_fn(struct work_struct *work)
 		guard_skin_enforced = false;
 	}
 
-	new_safe = bms_read_ok && !guard_battery_enforced && !guard_skin_enforced && !!READ_ONCE(ignore_vendor_thermal);
+	new_safe = bms_read_ok && !guard_battery_enforced && !guard_skin_enforced && !!READ_ONCE(ignore_vendor_charging_thermal);
 	if (new_safe != prev_safe) {
 		cached_override_safe = new_safe;
 		state_changed = true;
@@ -1435,7 +1439,7 @@ static bool thermal_throttle_enforced(struct batt_chg *chg)
 		return true;
 
 	/* If disabled at runtime, behave 100% like stock (enforce throttle) */
-	if (!READ_ONCE(ignore_vendor_thermal))
+	if (!READ_ONCE(ignore_vendor_charging_thermal))
 		return true;
 
 	/* Read true battery temperature from BMS fuel gauge in decidegC */
@@ -1475,7 +1479,7 @@ static bool thermal_throttle_enforced(struct batt_chg *chg)
 		enforced = guard_battery_enforced;
 	}
 
-	new_safe = (rc >= 0) && !guard_battery_enforced && !guard_skin_enforced && !!READ_ONCE(ignore_vendor_thermal);
+	new_safe = (rc >= 0) && !guard_battery_enforced && !guard_skin_enforced && !!READ_ONCE(ignore_vendor_charging_thermal);
 	if (new_safe != prev_safe) {
 		cached_override_safe = new_safe;
 		state_changed = true;
@@ -1496,7 +1500,7 @@ bool vendor_thermal_override_safe(void)
 	if (!smp_load_acquire(&thermal_override_initialized))
 		return false;
 
-	if (!READ_ONCE(ignore_vendor_thermal))
+	if (!READ_ONCE(ignore_vendor_charging_thermal))
 		return false;
 
 	spin_lock_irqsave(&guard_lock, flags);
@@ -4122,23 +4126,44 @@ static struct class_attribute class_attr_usb_icl_override_ma = {
 	.store = usb_icl_override_ma_store,
 };
 
-static ssize_t ignore_vendor_thermal_show(struct class *c,
-					struct class_attribute *attr, char *buf)
+static ssize_t ignore_vendor_charging_thermal_show(struct class *c,
+						   struct class_attribute *attr, char *buf)
 {
-	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(ignore_vendor_thermal));
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(ignore_vendor_charging_thermal));
 }
 
-static ssize_t ignore_vendor_thermal_store(struct class *c,
-					struct class_attribute *attr,
-					const char *buf, size_t count)
+static ssize_t ignore_vendor_charging_thermal_store(struct class *c,
+						    struct class_attribute *attr,
+						    const char *buf, size_t count)
 {
 	int val;
 
 	if (kstrtoint(buf, 10, &val))
 		return -EINVAL;
 
-	set_ignore_vendor_thermal_val(val);
+	set_ignore_vendor_charging_thermal_val(val);
 	return count;
+}
+static struct class_attribute class_attr_ignore_vendor_charging_thermal = {
+	.attr = {
+		.name = "ignore_vendor_charging_thermal",
+		.mode = 0666,
+	},
+	.show = ignore_vendor_charging_thermal_show,
+	.store = ignore_vendor_charging_thermal_store,
+};
+
+static ssize_t ignore_vendor_thermal_show(struct class *c,
+					  struct class_attribute *attr, char *buf)
+{
+	return ignore_vendor_charging_thermal_show(c, attr, buf);
+}
+
+static ssize_t ignore_vendor_thermal_store(struct class *c,
+					   struct class_attribute *attr,
+					   const char *buf, size_t count)
+{
+	return ignore_vendor_charging_thermal_store(c, attr, buf, count);
 }
 static struct class_attribute class_attr_ignore_vendor_thermal = {
 	.attr = {
@@ -4754,6 +4779,7 @@ VECTOR_ATTR_RO(charge_limit_state);
 
 VECTOR_ATTR_RW(bypass_charger);
 VECTOR_ATTR_RW(usb_icl_override_ma);
+VECTOR_ATTR_RW(ignore_vendor_charging_thermal);
 VECTOR_ATTR_RW(ignore_vendor_thermal);
 VECTOR_ATTR_RW(vendor_thermal_max_level);
 VECTOR_ATTR_RW(ignore_vendor_cpu_thermal);
@@ -4772,6 +4798,7 @@ static struct attribute *vector_attrs[] = {
 	&vector_attr_charge_limit_state.attr,
 	&vector_attr_bypass_charger.attr,
 	&vector_attr_usb_icl_override_ma.attr,
+	&vector_attr_ignore_vendor_charging_thermal.attr,
 	&vector_attr_ignore_vendor_thermal.attr,
 	&vector_attr_vendor_thermal_max_level.attr,
 	&vector_attr_ignore_vendor_cpu_thermal.attr,
@@ -4828,6 +4855,7 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_connector_temp.attr,
 	&class_attr_bypass_charger.attr,
 	&class_attr_usb_icl_override_ma.attr,
+	&class_attr_ignore_vendor_charging_thermal.attr,
 	&class_attr_ignore_vendor_thermal.attr,
 	&class_attr_vendor_thermal_max_level.attr,
 	&class_attr_ignore_vendor_cpu_thermal.attr,
