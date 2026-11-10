@@ -901,6 +901,8 @@ EXPORT_SYMBOL_GPL(vendor_thermal_reapply);
 
 static void set_ignore_vendor_thermal_val(int val)
 {
+	struct batt_chg *chg;
+
 	WRITE_ONCE(ignore_vendor_thermal, !!val);
 	pr_info("wt_chg: ignore_vendor_thermal set to %d\n", !!val);
 
@@ -910,9 +912,10 @@ static void set_ignore_vendor_thermal_val(int val)
 
 		vendor_thermal_reapply();
 
-		if (g_batt_chg) {
-			cancel_delayed_work(&g_batt_chg->batt_chg_work);
-			schedule_delayed_work(&g_batt_chg->batt_chg_work, 0);
+		chg = READ_ONCE(g_batt_chg);
+		if (chg && !READ_ONCE(chg->shutdown_flag)) {
+			cancel_delayed_work(&chg->batt_chg_work);
+			schedule_delayed_work(&chg->batt_chg_work, 0);
 		}
 	}
 }
@@ -938,6 +941,8 @@ MODULE_PARM_DESC(ignore_vendor_thermal, "Master switch: ignore vendor thermal mi
 
 static void set_vendor_thermal_max_level_val(int val)
 {
+	struct batt_chg *chg;
+
 	if (val < 0)
 		val = 0;
 	else if (val > 24)
@@ -946,9 +951,12 @@ static void set_vendor_thermal_max_level_val(int val)
 	WRITE_ONCE(vendor_thermal_max_level, val);
 	pr_info("wt_chg: vendor_thermal_max_level set to %d\n", val);
 
-	if (smp_load_acquire(&thermal_override_initialized) && g_batt_chg) {
-		cancel_delayed_work(&g_batt_chg->batt_chg_work);
-		schedule_delayed_work(&g_batt_chg->batt_chg_work, 0);
+	if (smp_load_acquire(&thermal_override_initialized)) {
+		chg = READ_ONCE(g_batt_chg);
+		if (chg && !READ_ONCE(chg->shutdown_flag)) {
+			cancel_delayed_work(&chg->batt_chg_work);
+			schedule_delayed_work(&chg->batt_chg_work, 0);
+		}
 	}
 }
 
@@ -1318,7 +1326,7 @@ EXPORT_SYMBOL_GPL(vendor_thermal_unregister_backlight_reapply);
 
 static void thermal_override_poll_work_fn(struct work_struct *work)
 {
-	struct batt_chg *chg = g_batt_chg;
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
 	int bms_temp = 0, skin_temp = 0;
 	int skin_max, ret;
 	bool bms_read_ok = false, skin_read_ok = false;
@@ -1330,8 +1338,8 @@ static void thermal_override_poll_work_fn(struct work_struct *work)
 	if (!smp_load_acquire(&thermal_override_initialized))
 		return;
 
-	if (!chg)
-		goto rearm;
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return;
 
 	/* 1. Poll battery temperature from BMS */
 	ret = batt_get_iio_channel(chg, BMS, BATT_QG_TEMP, &bms_temp);
@@ -1409,7 +1417,6 @@ static void thermal_override_poll_work_fn(struct work_struct *work)
 	if (state_changed)
 		vendor_thermal_reapply();
 
-rearm:
 	if (smp_load_acquire(&thermal_override_initialized) && thermal_override_poll_needed())
 		schedule_delayed_work(&thermal_override_poll_work, msecs_to_jiffies(2000));
 }
@@ -1873,7 +1880,12 @@ int power_off_charge_them(struct batt_chg *chg, int temp)
 
 int set_jeita_lcd_on_off(bool lcdon)
 {
-	g_batt_chg->lcd_on = lcdon;
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+
+	if (!chg)
+		return -ENODEV;
+
+	chg->lcd_on = lcdon;
 	pr_err("%s, lcd_on %d\n", __func__, lcdon);
 	return 0;
 }
@@ -1881,7 +1893,9 @@ EXPORT_SYMBOL(set_jeita_lcd_on_off);
 
 int get_jeita_lcd_on_off(void)
 {
-	return g_batt_chg->lcd_on;
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+
+	return chg ? chg->lcd_on : 0;
 }
 
 static int sw_battery_jeita(struct batt_chg *chg)
@@ -2152,7 +2166,7 @@ static int get_real_type(struct batt_chg *chg)
 	}
 
 	chg->real_type = real_type;
-	if(chg->old_charge_type != real_type) {
+	if(chg->old_charge_type != real_type && !READ_ONCE(chg->shutdown_flag)) {
 		chg->update_cont = 15;
 		chg->pd_type_cnt = 0;
 		power_supply_changed(chg->batt_psy);
@@ -3102,7 +3116,7 @@ static void batt_chg_main(struct work_struct *work)
 	struct batt_chg *chg = container_of(work,
 				struct batt_chg, batt_chg_work.work);
 
-	if (!chg)
+	if (!chg || READ_ONCE(chg->shutdown_flag))
 		return;
 
 	chg->start_cnt++;
@@ -3115,7 +3129,7 @@ static void batt_chg_main(struct work_struct *work)
 	batt_get_iio_channel(chg, BMS, BATT_QG_TEMP, &temp);
 	batt_get_iio_channel(chg, BMS, BATT_QG_CAPACITY, &soc);
 	pr_err("wt workup cp_master_temp %d, cp_slave_temp %d, get_boot_mode = %d, lcdon %d, vbus %d, count %d, count %d, soc %d fastcharge_mode %d\n",
-		chg->cp_master_temp, chg->cp_slave_temp, get_boot_mode(), g_batt_chg->lcd_on, chg->vbus_voltage, chg->update_cont, chg->power_supply_count, soc, chg->fastcharge_mode);
+		chg->cp_master_temp, chg->cp_slave_temp, get_boot_mode(), chg->lcd_on, chg->vbus_voltage, chg->update_cont, chg->power_supply_count, soc, chg->fastcharge_mode);
 
 	if(chg->mishow_flag) {
 		if(chg->real_type)
@@ -3185,7 +3199,7 @@ static void batt_chg_main(struct work_struct *work)
 			sw_battery_recharge(chg);
 		chg->power_supply_count = 0;
 		power_supply_changed(chg->usb_psy);
-		if (chg->shutdown_flag)
+		if (READ_ONCE(chg->shutdown_flag))
 			return;
 		if(chg->is_pps_on) {
 			if (chg->start_cnt <= 60)
@@ -3280,6 +3294,8 @@ static void batt_chg_main(struct work_struct *work)
 
 		chg->low_temp_flag = 0;
 		chg->charge_voltage_max = 4450000;
+		if (READ_ONCE(chg->shutdown_flag))
+			return;
 		if(soc <= 10 || temp > 550 || temp < 50)
 			schedule_delayed_work(&chg->batt_chg_work, msecs_to_jiffies(10000));
 		else
@@ -3313,6 +3329,9 @@ static void usb_therm(struct work_struct *work)
 	struct batt_chg *chg = container_of(work,
 				struct batt_chg, usb_therm_work.work);
 
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return;
+
 	get_charger_connector_temp(chg, &temp);
 	if(chg->connector_temp != 0) {
 		val = chg->connector_temp;
@@ -3342,6 +3361,9 @@ static void batt_usb_type(struct work_struct *work)
 {
 	struct batt_chg *chg = container_of(work,
 				struct batt_chg, usb_type_work.work);
+
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return;
 
 	chg->usb_float = 0;
 	chg->old_charge_type = POWER_SUPPLY_TYPE_UNKNOWN;
@@ -3728,12 +3750,12 @@ static CLASS_ATTR_RW(verify_digest);
 
 int pps_change_to_stop(void)
 {
-	int val;
-	if(g_batt_chg->input_suspend)
-		val = 1;
-	else
-		val = 0;
-	return val;
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+
+	if (!chg)
+		return 0;
+
+	return chg->input_suspend ? 1 : 0;
 }
 EXPORT_SYMBOL(pps_change_to_stop);
 
@@ -4007,6 +4029,9 @@ static ssize_t bypass_charger_store(struct class *c,
 						battery_class);
 	int val;
 
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return -ENODEV;
+
 	if (kstrtoint(buf, 10, &val))
 		return -EINVAL;
 
@@ -4056,6 +4081,9 @@ static ssize_t usb_icl_override_ma_store(struct class *c,
 	struct batt_chg *chg = container_of(c, struct batt_chg,
 						battery_class);
 	int val;
+
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return -ENODEV;
 
 	if (kstrtoint(buf, 10, &val))
 		return -EINVAL;
@@ -4437,6 +4465,9 @@ static bool is_trailing_clean(const char *p)
 
 static int wt_chg_apply_limits_locked(struct batt_chg *chg, int new_stop, int new_resume)
 {
+	if (READ_ONCE(chg->shutdown_flag))
+		return -ENODEV;
+
 	/* Disable path: writing 0 or 100 stores 0 (reads back 0/0) */
 	if (new_stop == 0 || new_stop == 100) {
 		WRITE_ONCE(chg->charge_stop_pct, 0);
@@ -4841,21 +4872,16 @@ static DEVICE_ATTR(verify_digest, 0660, dev_verify_digest_show, dev_verify_diges
 static ssize_t dev_real_type_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
 	int val;
 	int type, real_type;
 
-	batt_get_iio_channel(g_batt_chg, MAIN, MAIN_CHARGER_TYPE, &type);
-	real_type = get_usb_real_type(g_batt_chg);
-/*
-	if(real_type == POWER_SUPPLY_TYPE_USB_PD && type){
-		if(type == POWER_SUPPLY_TYPE_USB)
-			real_type = POWER_SUPPLY_TYPE_USB;
-		else
-			real_type = POWER_SUPPLY_TYPE_USB_PD;
-	} else {
-		real_type = POWER_SUPPLY_TYPE_UNKNOWN;
-	}
-*/
+	if (!chg)
+		return -ENODEV;
+
+	batt_get_iio_channel(chg, MAIN, MAIN_CHARGER_TYPE, &type);
+	real_type = get_usb_real_type(chg);
+
 	val = real_type - 3;
 
 	return scnprintf(buf, PAGE_SIZE, "%s\n", get_usb_type_name(val));
@@ -4865,20 +4891,28 @@ static DEVICE_ATTR(real_type, 0664, dev_real_type_show, NULL);
 static ssize_t dev_pd_auth_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
 
-	return scnprintf(buf, PAGE_SIZE, "%d\n", g_batt_chg->pd_auth);
+	if (!chg)
+		return -ENODEV;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", chg->pd_auth);
 }
 
 static ssize_t dev_pd_auth_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
 	int val;
+
+	if (!chg)
+		return -ENODEV;
 
 	if (kstrtoint(buf, 10, &val))
 		return -EINVAL;
 
-	g_batt_chg->pd_auth = val;
-	pr_err("g_batt_chg->pd_auth enable= %d\n", g_batt_chg->pd_auth);
+	chg->pd_auth = val;
+	pr_err("g_batt_chg->pd_auth enable= %d\n", chg->pd_auth);
 
 	return count;
 }
@@ -4887,19 +4921,28 @@ static DEVICE_ATTR(pd_auth, 0664, dev_pd_auth_show, dev_pd_auth_store);
 static ssize_t dev_authentic_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	return scnprintf(buf, PAGE_SIZE, "%d\n", g_batt_chg->batt_auth);
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+
+	if (!chg)
+		return -ENODEV;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", chg->batt_auth);
 }
 
 static ssize_t dev_authentic_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
 	int val;
+
+	if (!chg)
+		return -ENODEV;
 
 	if (kstrtoint(buf, 10, &val))
 		return -EINVAL;
 
-	g_batt_chg->batt_auth = val;
-	pr_err("g_batt_chg->batt_auth enable= %d\n", g_batt_chg->batt_auth);
+	chg->batt_auth = val;
+	pr_err("g_batt_chg->batt_auth enable= %d\n", chg->batt_auth);
 
 	return count;
 }
@@ -4908,37 +4951,46 @@ static DEVICE_ATTR(authentic, 0664, dev_authentic_show, dev_authentic_store);
 static ssize_t dev_input_suspend_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	return scnprintf(buf, PAGE_SIZE, "%d", g_batt_chg->input_suspend);
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
+
+	if (!chg)
+		return -ENODEV;
+
+	return scnprintf(buf, PAGE_SIZE, "%d", chg->input_suspend);
 }
 
 static ssize_t dev_input_suspend_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
+	struct batt_chg *chg = READ_ONCE(g_batt_chg);
 	int val;
+
+	if (!chg)
+		return -ENODEV;
 
 	if (kstrtoint(buf, 10, &val))
 		return -EINVAL;
 
-	g_batt_chg->input_suspend = val;
-	pr_err("dev chg->input_suspend = %d\n", g_batt_chg->input_suspend);
+	chg->input_suspend = val;
+	pr_err("dev chg->input_suspend = %d\n", chg->input_suspend);
 	if(val == 1) {
-		g_batt_chg->input_suspend  = 1;
-		batt_set_iio_channel(g_batt_chg, MAIN, MAIN_CHARGER_HZ, g_batt_chg->input_suspend);
-	//	g_batt_chg->input_suspend = 0;
-	//	batt_set_iio_channel(g_batt_chg, MAIN, MAIN_CHARGING_ENABLED, g_batt_chg->input_suspend);
-	//	g_batt_chg->input_suspend  = 1;
-		g_batt_chg->mishow_flag = true;
+		chg->input_suspend  = 1;
+		batt_set_iio_channel(chg, MAIN, MAIN_CHARGER_HZ, chg->input_suspend);
+	//	chg->input_suspend = 0;
+	//	batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, chg->input_suspend);
+	//	chg->input_suspend  = 1;
+		chg->mishow_flag = true;
 	}
 	if(val == 0) {
-		g_batt_chg->input_suspend = 0;
-		batt_set_iio_channel(g_batt_chg, MAIN, MAIN_CHARGER_HZ, val);
-	//	g_batt_chg->input_suspend = 1;
-	//	batt_set_iio_channel(g_batt_chg, MAIN, MAIN_CHARGING_ENABLED, val);
-	//	g_batt_chg->input_suspend = 0;
-		g_batt_chg->mishow_flag = false;
+		chg->input_suspend = 0;
+		batt_set_iio_channel(chg, MAIN, MAIN_CHARGER_HZ, val);
+	//	chg->input_suspend = 1;
+	//	batt_set_iio_channel(chg, MAIN, MAIN_CHARGING_ENABLED, val);
+	//	chg->input_suspend = 0;
+		chg->mishow_flag = false;
 	}
-	power_supply_changed(g_batt_chg->usb_psy);
-	power_supply_changed(g_batt_chg->batt_psy);
+	power_supply_changed(chg->usb_psy);
+	power_supply_changed(chg->batt_psy);
 	return count;
 }
 static DEVICE_ATTR(input_suspend, 0664, dev_input_suspend_show, dev_input_suspend_store);
@@ -5054,6 +5106,9 @@ static void generate_xm_charge_uvent(struct work_struct *work)
 	int count;
 	struct batt_chg *chg = container_of(work, struct batt_chg, xm_prop_change_work.work);
 
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return;
+
 	static char uevent_string[][MAX_UEVENT_LENGTH+1] = {
 		"POWER_SUPPLY_SOC_DECIMAL=\n",	//length=31+8
 		"POWER_SUPPLY_SOC_DECIMAL_RATE=\n",	//length=31+8
@@ -5095,10 +5150,12 @@ static void generate_xm_charge_uvent(struct work_struct *work)
 
 	free_page((unsigned long)prop_buf);
 	chg->update_cont = count - 1;
-	if(chg->ui_soc > 1)
-		schedule_delayed_work(&chg->xm_prop_change_work, msecs_to_jiffies(500));
-	else
-		schedule_delayed_work(&chg->xm_prop_change_work, msecs_to_jiffies(2000));
+	if (!READ_ONCE(chg->shutdown_flag)) {
+		if(chg->ui_soc > 1)
+			schedule_delayed_work(&chg->xm_prop_change_work, msecs_to_jiffies(500));
+		else
+			schedule_delayed_work(&chg->xm_prop_change_work, msecs_to_jiffies(2000));
+	}
 	return;
 }
 
@@ -5110,6 +5167,9 @@ static void xm_charger_debug_info_print_work(struct work_struct *work)
 	int interval = DISCHARGE_PERIOD_S;
 	static int update_cnt_old;
 
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return;
+
 	if(chg->start_cnt != update_cnt_old) {
 		update_cnt_old = chg->start_cnt;
 	} else {
@@ -5117,7 +5177,8 @@ static void xm_charger_debug_info_print_work(struct work_struct *work)
 		schedule_delayed_work(&chg->batt_chg_work, msecs_to_jiffies(100));
 	}
 	pr_err("update_cnt_old %d\n", update_cnt_old);
-	schedule_delayed_work(&chg->charger_debug_info_print_work, interval * HZ);
+	if (!READ_ONCE(chg->shutdown_flag))
+		schedule_delayed_work(&chg->charger_debug_info_print_work, interval * HZ);
 }
 
 static int batt_iio_write_raw(struct iio_dev *indio_dev,
@@ -5126,6 +5187,9 @@ static int batt_iio_write_raw(struct iio_dev *indio_dev,
 {
 	struct batt_chg *chg = iio_priv(indio_dev);
 	int rc = 0;
+
+	if (!chg || READ_ONCE(chg->shutdown_flag))
+		return -ENODEV;
 
 	switch (chan->channel) {
 	case PSY_IIO_PD_ACTIVE:
@@ -5390,6 +5454,11 @@ static int batt_chg_probe(struct platform_device *pdev)
 	batt_chg->limit_raw_cap = -1;
 	batt_chg->last_debounce_sample_time = 0;
 	INIT_DELAYED_WORK(&batt_chg->charge_limit_work, wt_chg_charge_limit_work_fn);
+	INIT_DEFERRABLE_WORK(&batt_chg->batt_chg_work, batt_chg_main);
+	INIT_DEFERRABLE_WORK(&batt_chg->usb_therm_work, usb_therm);
+	INIT_DEFERRABLE_WORK(&batt_chg->usb_type_work, batt_usb_type);
+	INIT_DEFERRABLE_WORK(&batt_chg->xm_prop_change_work, generate_xm_charge_uvent);
+	INIT_DEFERRABLE_WORK(&batt_chg->charger_debug_info_print_work, xm_charger_debug_info_print_work);
 	g_batt_chg = batt_chg;
 
 	INIT_DELAYED_WORK(&thermal_override_poll_work, thermal_override_poll_work_fn);
@@ -5412,7 +5481,7 @@ static int batt_chg_probe(struct platform_device *pdev)
 	if (rc < 0) {
 		pr_err("Couldn't parse device tree rc=%d\n", rc);
 #ifdef CONFIG_WT_QGKI
-		return rc;
+		goto cleanup;
 #endif
 	}
 
@@ -5448,10 +5517,6 @@ static int batt_chg_probe(struct platform_device *pdev)
 		goto cleanup;
 	}
 
-	INIT_DEFERRABLE_WORK(&batt_chg->batt_chg_work, batt_chg_main);
-	INIT_DEFERRABLE_WORK(&batt_chg->usb_therm_work, usb_therm);
-	INIT_DEFERRABLE_WORK(&batt_chg->usb_type_work, batt_usb_type);
-
 	batt_chg->wt_ws = wakeup_source_register(batt_chg->dev, "charge_wakeup");
 	if (!batt_chg->wt_ws) {
 		pr_err("wt chg workup fail!\n");
@@ -5459,8 +5524,6 @@ static int batt_chg_probe(struct platform_device *pdev)
 	}
 
 	schedule_delayed_work(&batt_chg->batt_chg_work, 0);
-	INIT_DEFERRABLE_WORK( &batt_chg->xm_prop_change_work, generate_xm_charge_uvent);
-	INIT_DEFERRABLE_WORK( &batt_chg->charger_debug_info_print_work, xm_charger_debug_info_print_work);
 	schedule_delayed_work(&batt_chg->charger_debug_info_print_work, 30 * HZ);
 	schedule_delayed_work(&batt_chg->xm_prop_change_work, msecs_to_jiffies(30000));
 	schedule_delayed_work(&batt_chg->usb_therm_work, msecs_to_jiffies(10000));
@@ -5472,8 +5535,33 @@ cleanup:
 	smp_store_release(&thermal_override_initialized, false);
 	cancel_delayed_work_sync(&thermal_override_poll_work);
 	cancel_work_sync(&thermal_override_reapply_work);
-	if (batt_chg)
+	if (batt_chg) {
+		bool was_held;
+
+		mutex_lock(&batt_chg->bypass_lock);
+		was_held = batt_chg->bypass_mode != 0;
+		batt_chg->bypass_mode = 0;
+		mutex_unlock(&batt_chg->bypass_lock);
+
+		mutex_lock(&batt_chg->limit_lock);
+		was_held = was_held || batt_chg->limit_hold;
+		batt_chg->limit_hold = false;
+		batt_chg->charge_stop_pct = 0;
+		batt_chg->charge_resume_pct = 0;
+		batt_chg->charge_limit_state = 0;
+		if (was_held)
+			sw_battery_jeita(batt_chg);
+		WRITE_ONCE(batt_chg->shutdown_flag, true);
+		mutex_unlock(&batt_chg->limit_lock);
+
+		cancel_delayed_work_sync(&batt_chg->batt_chg_work);
 		cancel_delayed_work_sync(&batt_chg->charge_limit_work);
+		cancel_delayed_work_sync(&batt_chg->charger_debug_info_print_work);
+		cancel_delayed_work_sync(&batt_chg->xm_prop_change_work);
+		cancel_delayed_work_sync(&batt_chg->usb_therm_work);
+		cancel_delayed_work_sync(&batt_chg->usb_type_work);
+	}
+	g_batt_chg = NULL;
 	wt_cleanup_vector_sysfs();
 	pr_err("batt_chg probe fail\n");
 	return rc;
@@ -5486,8 +5574,28 @@ static int batt_chg_remove(struct platform_device *pdev)
 	smp_store_release(&thermal_override_initialized, false);
 	cancel_delayed_work_sync(&thermal_override_poll_work);
 	cancel_work_sync(&thermal_override_reapply_work);
-	if (chg)
+	if (chg) {
+		mutex_lock(&chg->bypass_lock);
+		chg->bypass_mode = 0;
+		mutex_unlock(&chg->bypass_lock);
+
+		mutex_lock(&chg->limit_lock);
+		chg->limit_hold = false;
+		chg->charge_stop_pct = 0;
+		chg->charge_resume_pct = 0;
+		chg->charge_limit_state = 0;
+		sw_battery_jeita(chg);
+		WRITE_ONCE(chg->shutdown_flag, true);
+		mutex_unlock(&chg->limit_lock);
+
+		cancel_delayed_work_sync(&chg->batt_chg_work);
 		cancel_delayed_work_sync(&chg->charge_limit_work);
+		cancel_delayed_work_sync(&chg->charger_debug_info_print_work);
+		cancel_delayed_work_sync(&chg->xm_prop_change_work);
+		cancel_delayed_work_sync(&chg->usb_therm_work);
+		cancel_delayed_work_sync(&chg->usb_type_work);
+	}
+	g_batt_chg = NULL;
 	wt_cleanup_vector_sysfs();
 	return 0;
 }
@@ -5503,9 +5611,27 @@ static void batt_chg_shutdown(struct platform_device *pdev)
 	if (!chg)
 		return;
 
-	cancel_delayed_work_sync(&chg->charge_limit_work);
-	chg->shutdown_flag = true;
+	mutex_lock(&chg->bypass_lock);
+	chg->bypass_mode = 0;
+	mutex_unlock(&chg->bypass_lock);
 
+	mutex_lock(&chg->limit_lock);
+	chg->limit_hold = false;
+	chg->charge_stop_pct = 0;
+	chg->charge_resume_pct = 0;
+	chg->charge_limit_state = 0;
+	sw_battery_jeita(chg);
+	WRITE_ONCE(chg->shutdown_flag, true);
+	mutex_unlock(&chg->limit_lock);
+
+	cancel_delayed_work_sync(&chg->batt_chg_work);
+	cancel_delayed_work_sync(&chg->charge_limit_work);
+	cancel_delayed_work_sync(&chg->charger_debug_info_print_work);
+	cancel_delayed_work_sync(&chg->xm_prop_change_work);
+	cancel_delayed_work_sync(&chg->usb_therm_work);
+	cancel_delayed_work_sync(&chg->usb_type_work);
+
+	g_batt_chg = NULL;
 	return;
 }
 
