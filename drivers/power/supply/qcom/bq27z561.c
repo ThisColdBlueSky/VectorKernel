@@ -1852,8 +1852,11 @@ static const struct attribute_group fg_attr_group = {
 static int fg_dump_registers(struct bq_fg_chip *bq)
 {
 	int i;
-	int ret;
+	int ret = 0;
 	u16 val;
+
+	if (!(debug_mask & PR_REGISTER))
+		return 0;
 
 	for (i = 0; i < ARRAY_SIZE(fg_dump_regs); i++) {
 		ret = fg_read_word(bq, fg_dump_regs[i], &val);
@@ -2379,7 +2382,8 @@ static void fg_monitor_workfunc(struct work_struct *work)
 	int rc;
 
 	if (!bq->old_hw) {
-		rc = fg_dump_registers(bq);
+		if (debug_mask & PR_REGISTER)
+			rc = fg_dump_registers(bq);
 		/*if (rc < 0)
 			return;*/
 		fg_update_status(bq);
