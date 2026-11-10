@@ -1159,7 +1159,7 @@ static void bq2589x_adapter_out_workfunc(struct work_struct *work)
 	else
 		dev_info(bq->dev,"%s:reset vindpm threshold to 4400 successfully\n",__func__);
 
-//	cancel_delayed_work_sync(&bq->monitor_work);
+	cancel_delayed_work_sync(&bq->monitor_work);
 }
 
 static void bq2589x_ico_workfunc(struct work_struct *work)
@@ -1288,7 +1288,8 @@ static void bq2589x_monitor_workfunc(struct work_struct *work)
 
 	/* read temperature,or any other check if need to decrease charge current*/
 
-	schedule_delayed_work(&bq->monitor_work, msecs_to_jiffies(10000));
+	if (bq->status & BQ2589X_STATUS_PLUGIN)
+		schedule_delayed_work(&bq->monitor_work, msecs_to_jiffies(10000));
 }
 
 static void bq2589x_charger_irq_workfunc(struct work_struct *work)
