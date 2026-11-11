@@ -1,3 +1,4 @@
+#include <linux/version.h>
 /* SPDX-License-Identifier: GPL-2.0 */
 /*  linux/include/linux/clocksource.h
  *
@@ -87,7 +88,14 @@ struct clocksource {
 	u64 max_idle_ns;
 	u32 maxadj;
 #ifdef CONFIG_ARCH_CLOCKSOURCE_DATA
-	struct arch_clocksource_data archdata;
+	union {
+		struct arch_clocksource_data archdata;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+		struct {
+			enum vdso_clock_mode vdso_clock_mode;
+		};
+#endif
+	};
 #endif
 	u64 max_cycles;
 	const char *name;
