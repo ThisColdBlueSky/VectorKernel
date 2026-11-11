@@ -140,7 +140,7 @@ compile_flavor() {
     # 5. Package AnyKernel3 Zip
     local zip_name
     if [ "$flavor" = "ksu" ]; then
-        zip_name="Vector-veux-${BUILD_DATE}-KSU-KPM.zip"
+        zip_name="Vector-veux-${BUILD_DATE}-KSU.zip"
     else
         zip_name="Vector-veux-${BUILD_DATE}-Standard.zip"
     fi

@@ -154,7 +154,7 @@ jobs:
           bash ./scripts/config --file out/.config -e THINLTO
 
           if [ "${{ matrix.variant }}" = "ksu" ]; then
-            echo "Enabling KernelSU & SukiSU KPM (CONFIG_KSU=y, CONFIG_KPM=y)..."
+            echo "Enabling KernelSU & KPM (CONFIG_KSU=y, CONFIG_KPM=y)..." 
             bash ./scripts/config --file out/.config -e KSU -e KPM -e DEBUG_KERNEL -e KALLSYMS -e KALLSYMS_ALL
           else
             echo "Disabling KernelSU & KPM (CONFIG_KSU not set)..."
