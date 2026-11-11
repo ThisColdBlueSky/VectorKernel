@@ -1,0 +1,31 @@
+From: Antigravity <antigravity@google.com>
+Subject: [PATCH] selinux: call susfs_set_batch_sid() in out_flush for 5.4
+
+In apply_kernelsu_rules(), the call to susfs_set_batch_sid() was placed
+inside `#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)`.
+On Linux 5.4, the function takes the `#else` branch where
+susfs_set_batch_sid() was omitted at `out_flush:`. As a result,
+susfs_zygote_sid remained 0, causing ksu_handle_setresuid() to fail zygote
+identification and skip ksu_install_fd() for the manager app.
+
+Call susfs_set_batch_sid() at out_flush: on Linux 5.4 after the policy
+lock is released and the AVC cache is reset.
+
+Pinned to SukiSU commit: de9bc7e6b46181f8b27ac7b96db946420838dd18
+Re-check this patch if the SukiSU submodule pin changes.
+---
+ kernel/selinux/rules.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
+--- a/kernel/selinux/rules.c
++++ b/kernel/selinux/rules.c
+@@ -256,4 +256,7 @@ do_stop_machine:
+ out_flush:
+     smp_mb();
+     reset_avc_cache();
++#ifdef CONFIG_KSU_SUSFS
++    susfs_set_batch_sid();
++#endif
+ #endif
+-- 
