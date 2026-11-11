@@ -11,16 +11,7 @@ on:
         options:
           - both
           - ksu
-          - normal
-      edition:
-        description: 'Kernel edition to build (plus uses vector_defconfig)'
-        required: true
-        default: 'both'
-        type: choice
-        options:
-          - both
-          - standard
-          - plus
+          - non-ksu
       create_release:
         description: 'Publish GitHub Release'
         required: false
@@ -53,20 +44,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [normal, ksu]
+        variant: [non-ksu, ksu]
 
     steps:
       - name: Determine if variant should run
         id: check_variant
         run: |
-          TARGET="${{ github.event.inputs.variant }}"
-          CURRENT="${{ matrix.variant }}"
-          if [ -n "$TARGET" ] && [ "$TARGET" != "both" ] && [ "$TARGET" != "$CURRENT" ]; then
-            echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Skipping $CURRENT because target variant is $TARGET"
+          TARGET_VARIANT="${{ github.event.inputs.variant }}"
+          CURRENT_VARIANT="${{ matrix.variant }}"
+
+          RUN=true
+          if [ -n "$TARGET_VARIANT" ] && [ "$TARGET_VARIANT" != "both" ] && [ "$TARGET_VARIANT" != "$CURRENT_VARIANT" ]; then
+            RUN=false
+          fi
+
+          echo "should_run=$RUN" >> $GITHUB_OUTPUT
+          if [ "$RUN" = "true" ]; then
+            echo "Running build for $CURRENT_VARIANT"
           else
-            echo "should_run=true" >> $GITHUB_OUTPUT
-            echo "Running build for $CURRENT"
+            echo "Skipping $CURRENT_VARIANT (target: variant=$TARGET_VARIANT)"
           fi
 
       - name: Free Disk Space & Setup 16GB Swap
@@ -111,13 +107,8 @@ jobs:
           echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_ENV
           echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
 
-          if [ "${{ matrix.edition }}" = "plus" ]; then
-            echo "DEFCONFIG=vector_defconfig" >> $GITHUB_ENV
-            echo "ZIP_PREFIX=Vector-veux-plus" >> $GITHUB_ENV
-          else
-            echo "DEFCONFIG=veux_defconfig" >> $GITHUB_ENV
-            echo "ZIP_PREFIX=Vector-veux" >> $GITHUB_ENV
-          fi
+          echo "DEFCONFIG=veux_defconfig" >> $GITHUB_ENV
+          echo "ZIP_PREFIX=Vector-veux" >> $GITHUB_ENV
       - name: Install Build Dependencies
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
@@ -226,7 +217,7 @@ jobs:
           if [ "$VARIANT" = "ksu" ]; then
             ZIP_NAME="${ZIP_PREFIX}-${BUILD_DATE}-KSU-KPM.zip"
           else
-            ZIP_NAME="HizduBoy-veux-${BUILD_DATE}-Standard.zip"
+            ZIP_NAME="${ZIP_PREFIX}-${BUILD_DATE}-non-KSU.zip"
           fi
 
           PACKAGE_DIR="package_${VARIANT}"
@@ -249,16 +240,29 @@ jobs:
           cp "${ZIP_NAME}" build_output/
           cp "${ZIP_NAME}.sha256" build_output/
           cp out/arch/arm64/boot/Image "build_output/Image_${VARIANT}"
-          cp "$DTB_PATH" build_output/dtb
+          cp "$DTB_PATH" "build_output/dtb_${VARIANT}"
+
+          mkdir -p vmlinux_output
+          if [ -f out/vmlinux ]; then
+            echo "Archiving unstripped vmlinux..."
+            gzip -c out/vmlinux > vmlinux_output/vmlinux.gz
+          fi
 
       - name: Upload Build Artifacts
         if: steps.check_variant.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Vector-veux-${{ matrix.edition }}-${{ matrix.variant }}-kpm
+          name: Vector-veux-${{ matrix.variant }}
           path: build_output/*
           retention-days: 7
 
+      - name: Upload vmlinux Debug Artifact
+        if: steps.check_variant.outputs.should_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmlinux-${{ matrix.variant }}
+          path: vmlinux_output/*
+          retention-days: 7
   release:
     name: Package & Release
     needs: build
@@ -317,10 +321,5 @@ jobs:
             - **Kernel Release:** `5.4.302~Vector`
             
             ### Included Packages:
-            **Normal (non-plus):**
-            - **`Vector-veux-*-Standard.zip`**: Non-root clean kernel.
+            - **`Vector-veux-*-non-KSU.zip`**: Clean kernel without KernelSU.
             - **`Vector-veux-*-KSU.zip`**: KernelSU root support pre-compiled into `Image`.
-            
-            **Plus (`vector_defconfig`):**
-            - **`Vector-veux-plus-*-Standard.zip`**: Non-root plus kernel.
-            - **`Vector-veux-plus-*-KSU.zip`**: Plus kernel with KernelSU pre-compiled into `Image`.

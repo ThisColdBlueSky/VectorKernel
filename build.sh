@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Vector Kernel Build Script for POCO X4 Pro 5G (veux / peux)
-# Supports Normal, KernelSU, and Unified dual-mode AnyKernel3 packages.
+# Supports non-KSU, KernelSU, and Unified dual-mode AnyKernel3 packages.
 
 set -euo pipefail
 
@@ -19,9 +19,9 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Options:
-  --normal       Build standard non-KSU kernel only
+  --non-ksu      Build non-KSU kernel only (alias: --normal)
   --ksu          Build KernelSU-enabled kernel only
-  --both         Build both standard & KSU kernels + unified package (default)
+  --both         Build both non-KSU & KSU kernels + unified package (default)
   -j, --jobs N   Number of parallel make jobs (default: $JOBS)
   --clean        Clean output directories before building
   -h, --help     Show this help message
@@ -31,7 +31,7 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --normal)
+        --normal|--non-ksu)
             VARIANT="normal"
             shift
             ;;
@@ -152,7 +152,7 @@ compile_flavor() {
     if [ "$flavor" = "ksu" ]; then
         zip_name="Vector-veux-${BUILD_DATE}-KSU.zip"
     else
-        zip_name="Vector-veux-${BUILD_DATE}-Standard.zip"
+        zip_name="Vector-veux-${BUILD_DATE}-non-KSU.zip"
     fi
 
     local pkg_dir="$out_dir/ak3_pkg"
