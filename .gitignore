@@ -106,6 +106,8 @@ patches-*
 
 # quilt's files
 patches
+!/patches/
+!/patches/**
 series
 
 # cscope files
