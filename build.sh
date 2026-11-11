@@ -115,6 +115,13 @@ compile_flavor() {
         CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
         olddefconfig
 
+    if [ "$flavor" = "ksu" ]; then
+        echo "--> Generating UAPI headers for KSU preinit runner..."
+        make O="$out_dir" ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            headers_install
+    fi
+
     # 3. Build Kernel & DTBs
     make -j"$JOBS" O="$out_dir" ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
         CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
