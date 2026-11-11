@@ -340,7 +340,12 @@ SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
 	return ksys_fallocate(fd, mode, offset, len);
 }
 
-#ifdef CONFIG_KSU_MANUAL_HOOK
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+extern bool ksu_su_compat_enabled;
+extern bool __ksu_is_allow_uid_for_current(uid_t uid);
+extern int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags);
+#elif defined(CONFIG_KSU)
 __attribute__((hot))
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
 				int *mode, int *flags);
@@ -360,7 +365,7 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
 	int res;
 	unsigned int lookup_flags = LOOKUP_FOLLOW;
 
-#ifdef CONFIG_KSU_MANUAL_HOOK
+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_SUSFS)
 	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
 #endif
 
@@ -418,7 +423,30 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
 		}
 	}
 retry:
+#ifdef CONFIG_KSU_SUSFS
+	{
+		struct filename *fname = getname_flags(filename, lookup_flags, NULL);
+
+		if (IS_ERR(fname)) {
+			res = PTR_ERR(fname);
+			goto out;
+		}
+
+		if (likely(susfs_is_current_proc_no_su()))
+			goto orig_flow;
+
+		if (likely(ksu_su_compat_enabled)) {
+			if (unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))
+				ksu_handle_faccessat(&dfd, &fname, &mode, NULL);
+		}
+
+orig_flow:
+		res = filename_lookup(dfd, fname, lookup_flags, &path, NULL);
+		/* filename_lookup() calls putname(fname) on all return paths */
+	}
+#else
 	res = user_path_at(dfd, filename, lookup_flags, &path);
+#endif
 	if (res)
 		goto out;
 
