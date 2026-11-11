@@ -11,7 +11,7 @@ on:
         options:
           - both
           - ksu
-          - non-ksu
+          - kernel
       create_release:
         description: 'Publish GitHub Release'
         required: false
@@ -33,12 +33,12 @@ concurrency:
 
 jobs:
   build:
-    name: Build (${{ matrix.variant }})
+    name: Build (${{ matrix.variant == 'ksu' && 'KSU' || 'kernel' }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        variant: [non-ksu, ksu]
+        variant: [kernel, ksu]
 
     steps:
       - name: Determine if variant should run
@@ -214,8 +214,10 @@ jobs:
 
           if [ "$VARIANT" = "ksu" ]; then
             ZIP_NAME="${ZIP_PREFIX}-${BUILD_DATE}-KSU.zip"
+            IMAGE_SUFFIX="_KSU"
           else
-            ZIP_NAME="${ZIP_PREFIX}-${BUILD_DATE}-non-KSU.zip"
+            ZIP_NAME="${ZIP_PREFIX}-${BUILD_DATE}.zip"
+            IMAGE_SUFFIX=""
           fi
 
           PACKAGE_DIR="package_${VARIANT}"
@@ -237,8 +239,8 @@ jobs:
           mkdir -p build_output
           cp "${ZIP_NAME}" build_output/
           cp "${ZIP_NAME}.sha256" build_output/
-          cp out/arch/arm64/boot/Image "build_output/Image_${VARIANT}"
-          cp "$DTB_PATH" "build_output/dtb_${VARIANT}"
+          cp out/arch/arm64/boot/Image "build_output/Image${IMAGE_SUFFIX}"
+          cp "$DTB_PATH" "build_output/dtb${IMAGE_SUFFIX}"
 
           mkdir -p vmlinux_output
           if [ -f out/vmlinux ]; then
@@ -250,7 +252,7 @@ jobs:
         if: steps.check_variant.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Vector-veux-${{ matrix.variant }}
+          name: Vector-veux${{ matrix.variant == 'ksu' && '-KSU' || '' }}
           path: build_output/*
           retention-days: 7
 
@@ -258,7 +260,7 @@ jobs:
         if: steps.check_variant.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: vmlinux-${{ matrix.variant }}
+          name: vmlinux${{ matrix.variant == 'ksu' && '-KSU' || '' }}
           path: vmlinux_output/*
           retention-days: 7
 
@@ -319,5 +321,5 @@ jobs:
             - **Kernel Release:** `5.4.302~Vector`
             
             ### Included Packages:
-            - **`Vector-veux-*-non-KSU.zip`**: Clean kernel without KernelSU.
-            - **`Vector-veux-*-KSU.zip`**: KernelSU root support pre-compiled into `Image`.
+            - **`Vector-veux-YYYYMMDD.zip`**: Clean kernel.
+            - **`Vector-veux-YYYYMMDD-KSU.zip`**: KernelSU root support pre-compiled into `Image`.
