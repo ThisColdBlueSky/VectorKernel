@@ -165,11 +165,11 @@ jobs:
           bash ./scripts/config --file out/.config -e THINLTO
 
           if [ "${{ matrix.variant }}" = "ksu" ]; then
-            echo "Enabling KernelSU (CONFIG_KSU=y)..."
-            bash ./scripts/config --file out/.config -e KSU -e DEBUG_KERNEL -e KALLSYMS -e KALLSYMS_ALL
+            echo "Enabling KernelSU & KPM (CONFIG_KSU=y, CONFIG_KPM=y)..."
+            bash ./scripts/config --file out/.config -e KSU -e KPM -e DEBUG_KERNEL -e KALLSYMS -e KALLSYMS_ALL
           else
-            echo "Disabling KernelSU (CONFIG_KSU not set)..."
-            bash ./scripts/config --file out/.config -d KSU
+            echo "Disabling KernelSU & KPM (CONFIG_KSU not set)..."
+            bash ./scripts/config --file out/.config -d KSU -d KPM
           fi
 
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
@@ -208,6 +208,11 @@ jobs:
           echo "Kernel Image size: $(stat -c%s out/arch/arm64/boot/Image) bytes"
           echo "Found DTB: $DTB_PATH (size: $(stat -c%s "$DTB_PATH") bytes)"
           echo "DTB_PATH=$DTB_PATH" >> $GITHUB_ENV
+
+      - name: Patch Kernel with KernelPatch (KPM)
+        if: steps.check_variant.outputs.should_run == 'true' && matrix.variant == 'ksu'
+        run: |
+          bash ./scripts/patch_kpm.sh out/arch/arm64/boot/Image
 
       - name: Package AnyKernel3 Flashable Zip
         if: steps.check_variant.outputs.should_run == 'true'
