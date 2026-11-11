@@ -104,11 +104,11 @@ compile_flavor() {
 
     # 2. Toggle KSU
     if [ "$flavor" = "ksu" ]; then
-        echo "--> Enabling KernelSU (CONFIG_KSU=y)"
-        bash "$ROOT_DIR/scripts/config" --file "$out_dir/.config" -e KSU
+        echo "--> Enabling KernelSU & SukiSU KPM (CONFIG_KSU=y, CONFIG_KPM=y)"
+        bash "$ROOT_DIR/scripts/config" --file "$out_dir/.config" -e KSU -e KPM -e KALLSYMS -e KALLSYMS_ALL
     else
-        echo "--> Disabling KernelSU (CONFIG_KSU not set)"
-        bash "$ROOT_DIR/scripts/config" --file "$out_dir/.config" -d KSU
+        echo "--> Disabling KernelSU & KPM (CONFIG_KSU not set)"
+        bash "$ROOT_DIR/scripts/config" --file "$out_dir/.config" -d KSU -d KPM
     fi
 
     make O="$out_dir" ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
@@ -134,10 +134,16 @@ compile_flavor() {
         exit 1
     fi
 
+    # 4.5 Patch Image with KernelPatch (KPM)
+    if [ "$flavor" = "ksu" ]; then
+        echo "--> Patching kernel Image with KernelPatch (KPM)..."
+        bash "$ROOT_DIR/scripts/patch_kpm.sh" "$out_dir/arch/arm64/boot/Image"
+    fi
+
     # 5. Package AnyKernel3 Zip
     local zip_name
     if [ "$flavor" = "ksu" ]; then
-        zip_name="Vector-veux-${BUILD_DATE}-KSU.zip"
+        zip_name="Vector-veux-${BUILD_DATE}-KSU-KPM.zip"
     else
         zip_name="Vector-veux-${BUILD_DATE}-Standard.zip"
     fi

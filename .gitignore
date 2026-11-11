@@ -108,6 +108,7 @@ patches-*
 patches
 !/patches/
 !/patches/**
+/tools/kpm/
 series
 
 # cscope files

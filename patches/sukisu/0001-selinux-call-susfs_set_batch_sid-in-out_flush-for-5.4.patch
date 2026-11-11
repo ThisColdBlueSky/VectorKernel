@@ -1,4 +1,4 @@
-From: Antigravity <antigravity@google.com>
+From: rhythmcache <153998419+rhythmcache@users.noreply.github.com>
 Subject: [PATCH] selinux: call susfs_set_batch_sid() in out_flush for 5.4
 
 In apply_kernelsu_rules(), the call to susfs_set_batch_sid() was placed
