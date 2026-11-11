@@ -190,6 +190,14 @@ jobs:
           export KBUILD_BUILD_USER="ThisColdBlueSky"
           export KBUILD_BUILD_HOST="github-actions"
 
+          if [ "${{ matrix.variant }}" = "ksu" ]; then
+            echo "Generating UAPI headers for KSU preinit runner..."
+            make O=out ARCH=arm64 \
+              CC="ccache clang" LLVM=1 LLVM_IAS=1 \
+              CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+              headers_install
+          fi
+
           make -j$(nproc --all) O=out ARCH=arm64 \
             CC="ccache clang" LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
