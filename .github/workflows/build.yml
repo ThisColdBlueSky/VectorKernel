@@ -31,6 +31,7 @@ on:
       - main
       - arm64-string-backport
       - bbrv3-backport
+      - sukisu-migration
     paths-ignore:
       - '**.md'
       - '.gitignore'
@@ -177,6 +178,12 @@ jobs:
           export KBUILD_BUILD_USER="ThisColdBlueSky"
           export KBUILD_BUILD_HOST="github-actions"
 
+          echo "Generating UAPI headers for KSU preinit runner..."
+          make O=out ARCH=arm64 \
+            CC="ccache clang" LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            headers_install
+
           make -j$(nproc --all) O=out ARCH=arm64 \
             CC="ccache clang" LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
@@ -189,6 +196,11 @@ jobs:
           if [ ! -f out/arch/arm64/boot/Image ]; then
             echo "::error::Kernel Image was not generated!"
             exit 1
+          fi
+
+          if [ -f out/vmlinux ]; then
+            echo "=== KSU and SUSFS Symbols in vmlinux ==="
+            llvm/bin/llvm-nm out/vmlinux | grep -E "ksu_|susfs_" || true
           fi
 
           DTB_PATH=$(find out/arch/arm64/boot/dts -name "veux.dtb" | head -n 1)
