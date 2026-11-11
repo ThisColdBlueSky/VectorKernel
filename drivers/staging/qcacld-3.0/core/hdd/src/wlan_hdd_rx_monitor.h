@@ -65,7 +65,7 @@ int hdd_enable_monitor_mode(struct net_device *dev);
  *
  * Return: 0 for success; non-zero for failure
  */
-int hdd_disable_monitor_mode(struct net_device *dev);
+int hdd_disable_monitor_mode(void);
 #else
 static inline void hdd_monitor_set_rx_monitor_cb(struct ol_txrx_ops *txrx,
 					ol_txrx_rx_mon_fp rx_monitor_cb){ }
@@ -77,7 +77,7 @@ static inline int hdd_enable_monitor_mode(struct net_device *dev)
 	return 0;
 }
 
-static inline int hdd_disable_monitor_mode(struct net_device *dev)
+static inline int hdd_disable_monitor_mode(void)
 {
 	return 0;
 }
