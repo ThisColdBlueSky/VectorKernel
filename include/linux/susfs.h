@@ -8,6 +8,7 @@
 #include <linux/path.h>
 #include <linux/susfs_def.h>
 #include <linux/statfs.h>
+#include <linux/sukisu_compat.h>
 
 #define SUSFS_VERSION "v2.4.0"
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
