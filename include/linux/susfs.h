@@ -257,4 +257,65 @@ void susfs_start_sdcard_monitor_fn(void);
 /* susfs_init */
 void susfs_init(void);
 
+/*******************************************/
+/* KERNEL-FACING SUSFS HOOKS & EXPORTS     */
+/*******************************************/
+struct mount;
+struct kstatfs;
+struct kstat;
+struct seq_file;
+struct selinux_state;
+struct av_decision;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+bool susfs_is_inode_sus_path(struct inode *inode);
+int susfs_get_data_path(struct path *path);
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern struct static_key_false susfs_is_hide_sus_mnts_for_non_su_procs_enabled;
+int susfs_get_non_sus_mnt_id_from_mnt(struct mount *orig_mnt);
+struct vfsmount *susfs_get_non_sus_vfsmnt_from_vfsmnt(struct vfsmount *vfsmnt);
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+bool susfs_is_inode_sus_kstat(struct inode *inode, bool *out_is_fuse);
+void susfs_sus_kstat_spoof_inotify_fdinfo(unsigned long *out_target_ino, dev_t *out_target_dev);
+void susfs_sus_kstat_spoof_proc_fd_seq_show(int *out_target_mnt_id, unsigned long *out_target_ino, dev_t target_dev);
+void susfs_sus_kstat_spoof_show_map_vma(struct inode *inode, dev_t *out_dev, unsigned long *out_ino);
+int susfs_sus_kstat_spoof_vfs_statfs(struct inode *inode, struct kstatfs *buf, bool *is_fuse);
+void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode, struct kstat *stat, u32 result_mask);
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+extern struct static_key_false susfs_is_uname_spoof_buffer_set;
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;
+void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+extern struct srcu_struct susfs_srcu_open_redirect;
+struct filename *susfs_open_redirect_spoof_do_sys_openat(struct inode *inode);
+int susfs_open_redirect_spoof_vfs_readlink(struct inode *inode, char __user *buffer, int buflen);
+int susfs_open_redirect_spoof_do_proc_readlink(struct inode *inode, char *tmp_buf, int buflen);
+int susfs_open_redirect_spoof_show_map_vma_srcu(struct inode *inode, unsigned long *out_ino, dev_t *out_dev, char **out_spoofed_name);
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+bool susfs_is_priority_uid_filtered(uid_t uid);
+#endif
+
+extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+extern struct static_key_false susfs_is_avc_log_spoofing_enabled;
+
+bool susfs_is_current_ksu_domain(void);
+bool susfs_is_sus_type_rcu(u32 sid);
+void susfs_spoof_avd_allowed_rcu(u32 s_type, u32 t_type, u32 c_type, u32 *avd_allowed);
+int susfs_security_context_to_sid(struct selinux_state *state, const char *scontext, u32 scontext_len, u32 *sid, gfp_t gfp);
+int susfs_security_context_str_to_sid(struct selinux_state *state, const char *scontext, u32 *sid, gfp_t gfp);
+void susfs_security_compute_av_user(struct selinux_state *state, u32 ssid, u32 tsid, u16 tclass, struct av_decision *avd);
+
 #endif
