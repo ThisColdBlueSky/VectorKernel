@@ -81,6 +81,11 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      - name: Apply SukiSU Patch
+        if: steps.check_variant.outputs.should_run == 'true' && matrix.variant == 'ksu'
+        run: |
+          bash ./scripts/patch_sukisu.sh
+
       - name: Set up Environment Variables
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
