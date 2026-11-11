@@ -106,8 +106,6 @@ patches-*
 
 # quilt's files
 patches
-!/patches/
-!/patches/**
 /tools/kpm/
 series
 

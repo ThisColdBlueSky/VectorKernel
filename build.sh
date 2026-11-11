@@ -82,9 +82,6 @@ export KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST:-$(hostname 2>/dev/null || echo an
 
 mkdir -p "$DIST_DIR"
 
-# Apply out-of-tree submodule patches idempotently
-bash "$ROOT_DIR/scripts/patch_sukisu.sh"
-
 compile_flavor() {
     local flavor="$1"
     local out_dir="$OUT_BASE/$flavor"
