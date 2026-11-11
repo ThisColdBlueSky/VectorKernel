@@ -141,6 +141,14 @@ jobs:
           llvm/bin/clang --version
           llvm/bin/ld.lld --version
 
+      - name: Setup ccache
+        if: steps.check_variant.outputs.should_run == 'true'
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.edition }}-${{ matrix.variant }}-${{ github.sha }}
+          restore-keys: ${{ matrix.edition }}-${{ matrix.variant }}-
+          max-size: 4G
+
       - name: Configure Kernel
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
