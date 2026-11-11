@@ -374,8 +374,7 @@ bool susfs_is_inode_sus_path(struct inode *inode)
 	if (!susfs_is_current_proc_umounted_app()) {
 		return false;
 	}
-	if (!inode->i_mapping) {
-		SUSFS_LOGE("inode->i_mapping is NULL\n");
+	if (!inode || !inode->i_mapping) {
 		return false;
 	}
 	if (inode->i_sb->s_magic == FUSE_SUPER_MAGIC) {
