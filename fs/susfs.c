@@ -1267,20 +1267,20 @@ int susfs_open_redirect_spoof_vfs_readlink(struct inode *inode, char __user *buf
 		if (entry->reversed_lookup_only &&
 			entry->target_dev == inode->i_sb->s_dev)
 		{
+			int len;
+
 			SUSFS_LOGI("spoof path '%s' to '%s'\n",
 					entry->info.target_pathname, entry->info.redirected_pathname);
-			if (strlen(entry->info.redirected_pathname) >= buflen) {
-				SUSFS_LOGE("buflen not big enough\n");
-				srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
-				return -ENAMETOOLONG;
-			}
-			if (copy_to_user(buffer, entry->info.redirected_pathname, strlen(entry->info.redirected_pathname))) {
+			len = strlen(entry->info.redirected_pathname);
+			if (len > buflen)
+				len = buflen;
+			if (copy_to_user(buffer, entry->info.redirected_pathname, len)) {
 				SUSFS_LOGE("copy_to_user() failed\n");
 				srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
 				return -EFAULT;
 			}
 			srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
-			return 0;
+			return len;
 		}
 	}
 	srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
