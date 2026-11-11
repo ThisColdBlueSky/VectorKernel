@@ -48,6 +48,9 @@
 #include <linux/sched/task.h>
 #include <linux/hugetlb.h>
 #include <linux/mman.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+#include <linux/susfs_def.h>
+#endif
 #include <linux/swap.h>
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
@@ -4565,6 +4568,13 @@ int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
 		int bytes, ret, offset;
 		void *maddr;
 		struct page *page = NULL;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		vma = find_vma(mm, addr);
+		if (vma && vma->vm_start <= addr && vma->vm_file &&
+		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+			break;
+#endif
 
 		ret = get_user_pages_remote(tsk, mm, addr, 1,
 				gup_flags, &page, &vma, NULL);
