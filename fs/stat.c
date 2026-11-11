@@ -20,6 +20,18 @@
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
+#include "internal.h"
+
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+extern struct static_key_true ksu_is_init_rc_hook_enabled;
+extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);
+extern bool ksu_su_compat_enabled;
+extern bool __ksu_is_allow_uid_for_current(uid_t uid);
+extern int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
+#elif defined(CONFIG_KSU)
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
+#endif
 
 /**
  * generic_fillattr - Fill in the basic attributes from the inode struct
@@ -144,6 +156,10 @@ int vfs_statx_fd(unsigned int fd, struct kstat *stat,
 	if (f.file) {
 		error = vfs_getattr(&f.file->f_path, stat,
 				    request_mask, query_flags);
+#ifdef CONFIG_KSU_SUSFS
+		if (static_branch_unlikely(&ksu_is_init_rc_hook_enabled))
+			ksu_handle_vfs_fstat(fd, &stat->size);
+#endif // #ifdef CONFIG_KSU_SUSFS
 		fdput(f);
 	}
 	return error;
@@ -184,7 +200,25 @@ int vfs_statx(int dfd, const char __user *filename, int flags,
 		lookup_flags |= LOOKUP_EMPTY;
 
 retry:
+#ifdef CONFIG_KSU_SUSFS
+	{
+		struct filename *fname = getname_flags(filename, lookup_flags, NULL);
+
+		if (likely(susfs_is_current_proc_no_su()))
+			goto orig_flow;
+
+		if (likely(ksu_su_compat_enabled)) {
+			if (unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))
+				ksu_handle_stat(&dfd, &fname, &flags);
+		}
+
+orig_flow:
+		error = filename_lookup(dfd, fname, lookup_flags, &path, NULL);
+		// no putname(fname) here as filename_lookup() has it done for us already
+	}
+#else
 	error = user_path_at(dfd, filename, lookup_flags, &path);
+#endif // #ifdef CONFIG_KSU_SUSFS
 	if (error)
 		goto out;
 
@@ -357,12 +391,6 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
 	return cp_new_stat(&stat, statbuf);
 }
 
-#ifdef CONFIG_KSU
-__attribute__((hot))
-extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
-			   int *flags);
-#endif
-
 #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
 SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
 		struct stat __user *, statbuf, int, flag)
@@ -370,7 +398,7 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
 	struct kstat stat;
 	int error;
 
-#ifdef CONFIG_KSU
+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_SUSFS)
 	ksu_handle_stat(&dfd, &filename, &flag);
 #endif
 	error = vfs_fstatat(dfd, filename, &stat, flag);
@@ -524,7 +552,7 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
 	struct kstat stat;
 	int error;
 
-#ifdef CONFIG_KSU
+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_SUSFS)
 	ksu_handle_stat(&dfd, &filename, &flag);
 #endif
 	error = vfs_fstatat(dfd, filename, &stat, flag);
