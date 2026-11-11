@@ -13,6 +13,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/version.h>
 #include <linux/pagemap.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>

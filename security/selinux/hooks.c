@@ -22,6 +22,7 @@
  */
 
 #include <linux/init.h>
+#include <linux/version.h>
 #include <linux/kd.h>
 #include <linux/kernel.h>
 #include <linux/tracehook.h>
