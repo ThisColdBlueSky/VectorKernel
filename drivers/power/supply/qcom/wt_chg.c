@@ -4059,7 +4059,7 @@ static ssize_t bypass_charger_store(struct class *c,
 static struct class_attribute class_attr_bypass_charger = {
 	.attr = {
 		.name = "bypass_charger",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = bypass_charger_show,
 	.store = bypass_charger_store,
@@ -4116,7 +4116,7 @@ static ssize_t usb_icl_override_ma_store(struct class *c,
 static struct class_attribute class_attr_usb_icl_override_ma = {
 	.attr = {
 		.name = "usb_icl_override_ma",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = usb_icl_override_ma_show,
 	.store = usb_icl_override_ma_store,
@@ -4143,7 +4143,7 @@ static ssize_t ignore_vendor_charging_thermal_store(struct class *c,
 static struct class_attribute class_attr_ignore_vendor_charging_thermal = {
 	.attr = {
 		.name = "ignore_vendor_charging_thermal",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = ignore_vendor_charging_thermal_show,
 	.store = ignore_vendor_charging_thermal_store,
@@ -4170,7 +4170,7 @@ static ssize_t vendor_thermal_max_level_store(struct class *c,
 static struct class_attribute class_attr_vendor_thermal_max_level = {
 	.attr = {
 		.name = "vendor_thermal_max_level",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = vendor_thermal_max_level_show,
 	.store = vendor_thermal_max_level_store,
@@ -4197,7 +4197,7 @@ static ssize_t ignore_vendor_cpu_thermal_store(struct class *c,
 static struct class_attribute class_attr_ignore_vendor_cpu_thermal = {
 	.attr = {
 		.name = "ignore_vendor_cpu_thermal",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = ignore_vendor_cpu_thermal_show,
 	.store = ignore_vendor_cpu_thermal_store,
@@ -4224,7 +4224,7 @@ static ssize_t cpu_little_override_max_state_store(struct class *c,
 static struct class_attribute class_attr_cpu_little_override_max_state = {
 	.attr = {
 		.name = "cpu_little_override_max_state",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = cpu_little_override_max_state_show,
 	.store = cpu_little_override_max_state_store,
@@ -4251,7 +4251,7 @@ static ssize_t cpu_big_override_max_state_store(struct class *c,
 static struct class_attribute class_attr_cpu_big_override_max_state = {
 	.attr = {
 		.name = "cpu_big_override_max_state",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = cpu_big_override_max_state_show,
 	.store = cpu_big_override_max_state_store,
@@ -4278,7 +4278,7 @@ static ssize_t skin_override_max_mc_store(struct class *c,
 static struct class_attribute class_attr_skin_override_max_mc = {
 	.attr = {
 		.name = "skin_override_max_mc",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = skin_override_max_mc_show,
 	.store = skin_override_max_mc_store,
@@ -4305,7 +4305,7 @@ static ssize_t ignore_vendor_gpu_thermal_store(struct class *c,
 static struct class_attribute class_attr_ignore_vendor_gpu_thermal = {
 	.attr = {
 		.name = "ignore_vendor_gpu_thermal",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = ignore_vendor_gpu_thermal_show,
 	.store = ignore_vendor_gpu_thermal_store,
@@ -4332,7 +4332,7 @@ static ssize_t gpu_override_max_state_store(struct class *c,
 static struct class_attribute class_attr_gpu_override_max_state = {
 	.attr = {
 		.name = "gpu_override_max_state",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = gpu_override_max_state_show,
 	.store = gpu_override_max_state_store,
@@ -4359,7 +4359,7 @@ static ssize_t ignore_vendor_backlight_thermal_store(struct class *c,
 static struct class_attribute class_attr_ignore_vendor_backlight_thermal = {
 	.attr = {
 		.name = "ignore_vendor_backlight_thermal",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = ignore_vendor_backlight_thermal_show,
 	.store = ignore_vendor_backlight_thermal_store,
@@ -4386,7 +4386,7 @@ static ssize_t battery_trip_decic_store(struct class *c,
 static struct class_attribute class_attr_battery_trip_decic = {
 	.attr = {
 		.name = "battery_trip_decic",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = battery_trip_decic_show,
 	.store = battery_trip_decic_store,
@@ -4413,7 +4413,7 @@ static ssize_t battery_clear_decic_store(struct class *c,
 static struct class_attribute class_attr_battery_clear_decic = {
 	.attr = {
 		.name = "battery_clear_decic",
-		.mode = 0666,
+		.mode = 0660,
 	},
 	.show = battery_clear_decic_show,
 	.store = battery_clear_decic_store,
@@ -4743,7 +4743,7 @@ static ssize_t vector_##_name##_store(struct kobject *kobj, \
 	return _name##_store(&chg->battery_class, &class_attr_##_name, buf, count); \
 } \
 static struct kobj_attribute vector_attr_##_name = { \
-	.attr = { .name = #_name, .mode = 0666 }, \
+	.attr = { .name = #_name, .mode = 0660 }, \
 	.show = vector_##_name##_show, \
 	.store = vector_##_name##_store, \
 };
