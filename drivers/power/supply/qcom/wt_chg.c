@@ -939,10 +939,6 @@ static const struct kernel_param_ops ignore_vendor_charging_thermal_param_ops = 
 module_param_cb(ignore_vendor_charging_thermal, &ignore_vendor_charging_thermal_param_ops, &ignore_vendor_charging_thermal, 0644);
 MODULE_PARM_DESC(ignore_vendor_charging_thermal, "Ignore vendor charging thermal mitigation when battery is safe (removes fast-charging caps; skin backstop disabled by default)");
 
-/* Backwards-compatible alias */
-module_param_cb(ignore_vendor_thermal, &ignore_vendor_charging_thermal_param_ops, &ignore_vendor_charging_thermal, 0644);
-MODULE_PARM_DESC(ignore_vendor_thermal, "Deprecated alias for ignore_vendor_charging_thermal");
-
 static void set_vendor_thermal_max_level_val(int val)
 {
 	struct batt_chg *chg;
@@ -4153,27 +4149,6 @@ static struct class_attribute class_attr_ignore_vendor_charging_thermal = {
 	.store = ignore_vendor_charging_thermal_store,
 };
 
-static ssize_t ignore_vendor_thermal_show(struct class *c,
-					  struct class_attribute *attr, char *buf)
-{
-	return ignore_vendor_charging_thermal_show(c, attr, buf);
-}
-
-static ssize_t ignore_vendor_thermal_store(struct class *c,
-					   struct class_attribute *attr,
-					   const char *buf, size_t count)
-{
-	return ignore_vendor_charging_thermal_store(c, attr, buf, count);
-}
-static struct class_attribute class_attr_ignore_vendor_thermal = {
-	.attr = {
-		.name = "ignore_vendor_thermal",
-		.mode = 0666,
-	},
-	.show = ignore_vendor_thermal_show,
-	.store = ignore_vendor_thermal_store,
-};
-
 static ssize_t vendor_thermal_max_level_show(struct class *c,
 					struct class_attribute *attr, char *buf)
 {
@@ -4780,7 +4755,6 @@ VECTOR_ATTR_RO(charge_limit_state);
 VECTOR_ATTR_RW(bypass_charger);
 VECTOR_ATTR_RW(usb_icl_override_ma);
 VECTOR_ATTR_RW(ignore_vendor_charging_thermal);
-VECTOR_ATTR_RW(ignore_vendor_thermal);
 VECTOR_ATTR_RW(vendor_thermal_max_level);
 VECTOR_ATTR_RW(ignore_vendor_cpu_thermal);
 VECTOR_ATTR_RW(cpu_little_override_max_state);
@@ -4799,7 +4773,6 @@ static struct attribute *vector_attrs[] = {
 	&vector_attr_bypass_charger.attr,
 	&vector_attr_usb_icl_override_ma.attr,
 	&vector_attr_ignore_vendor_charging_thermal.attr,
-	&vector_attr_ignore_vendor_thermal.attr,
 	&vector_attr_vendor_thermal_max_level.attr,
 	&vector_attr_ignore_vendor_cpu_thermal.attr,
 	&vector_attr_cpu_little_override_max_state.attr,
@@ -4856,7 +4829,6 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_bypass_charger.attr,
 	&class_attr_usb_icl_override_ma.attr,
 	&class_attr_ignore_vendor_charging_thermal.attr,
-	&class_attr_ignore_vendor_thermal.attr,
 	&class_attr_vendor_thermal_max_level.attr,
 	&class_attr_ignore_vendor_cpu_thermal.attr,
 	&class_attr_cpu_little_override_max_state.attr,

@@ -12,7 +12,7 @@ Changes after 3aabb34
 ## Drivers
 - Revert NetHunter-style qcacld monitor-mode/frame-injection changes and restore exact upstream HDD files (2c4c6657e, 6bdc76ee1)
 - Harden wt_chg workqueue teardown, shutdown handling and g_batt_chg access (c0373ba39, f0cec9533)
-- Rename ignore_vendor_thermal to ignore_vendor_charging_thermal with alias and stock default (014c4fb58)
+- Rename ignore_vendor_thermal to ignore_vendor_charging_thermal with stock default (014c4fb58)
 - Eliminate redundant qcom power-supply I2C register dumps and unplugged polling (525885b79)
 - Disable Lindroid EVDI driver and remove its Kconfig/Makefile build hooks (8b35eb307)
 
