@@ -122,7 +122,7 @@ compile_flavor() {
     # 3. Build Kernel & DTBs
     make -j"$JOBS" O="$out_dir" ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
         CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-        KCFLAGS="-Wno-error" \
+        KCFLAGS="-Wno-error -O3" \
         Image dtbs
 
     # 4. Verify outputs
