@@ -1,10 +1,10 @@
-# Changelog: 3aabb34 → af720791d
+# Changelog: 3aabb34 → 607b7e374
 
 ## Features
 - Replace BakaSU with SukiSU-Ultra and add SUSFS v2.4.0 core with SUS_PATH, OPEN_REDIRECT, execve sucompat/preinit, read/write/stat, mm, fs, kernel, proc and SELinux hooks (464bc628c, dda202e09, 8e5ed5103, dcc447ed8, 246dc0f54, 5fe0fdda8, e957c116e)
 - Add kernel-side battery charge limit with hysteresis and charge_stop_pct/charge_resume_pct controls (323c758ff, 7c6ae3015)
 - Add runtime bypass charging and SDP USB input-current override (080945b13, 3709a3343)
-- Expose unified /sys/kernel/vector/ controls with 0666 permissions while preserving /sys/class/qcom-battery/ compatibility (db8cb853b, 5445f6091, 8a3c81d26)
+- Expose unified /sys/kernel/vector/ controls with 0660 permissions while preserving /sys/class/qcom-battery/ compatibility (db8cb853b, 5445f6091, 607b7e374)
 - Add safe thermal throttle override using BMS battery temperature hysteresis and JEITA protection, and drop voltage hysteresis (8897d9fe7, 8894d65ca)
 - Add safe CPU/GPU/backlight thermal overrides with separate requested state and reapply (6d5fac3de, 758bb231e, 7422128da)
 - Add thermal_override parameter setters, debug trips, lifecycle cleanup, per-device serialization and CONFIG_WT_CHG stubs (9a39ef6dc, a134f91ed, 07cf15209, cd8fbcdcf)
@@ -22,6 +22,7 @@
 - Fix KSU manual hook prototypes and ksu_is_init_rc_hook_enabled static_key_false type (3d51c38a0)
 - Serialize cooling set_cur_state/reapply with per-device mutex and guard pre-probe thermal init (07cf15209, a134f91ed)
 - Update SukiSU-Ultra submodule to include the merged 5.4 reset_avc_cache fix (25e2a36d7, e736a1040)
+- Restore the sysfs attribute-group permission mask to 0664 after dropping the 0666 allowance (607b7e374)
 
 ## Performance
 - Backport Maple tree and convert VMA tracking/walkers from rbtree/vmacache to Maple tree (0468a12fd)
