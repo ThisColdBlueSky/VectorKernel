@@ -111,7 +111,7 @@ struct selinux_state selinux_state;
 #endif
 #ifdef CONFIG_KSU_SUSFS
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
-extern bool ksu_selinux_hide_running __read_mostly;
+#include <linux/ksu_hook.h>
 #endif
 extern int susfs_security_context_to_sid(struct selinux_state *state,
 			    const char *scontext, u32 scontext_len, u32 *sid,

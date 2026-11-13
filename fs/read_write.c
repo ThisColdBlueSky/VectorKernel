@@ -26,9 +26,7 @@
 #include <asm/unistd.h>
 
 #ifdef CONFIG_KSU
-extern bool ksu_vfs_read_hook;
-extern void ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
-				size_t *count_ptr, loff_t **pos);
+#include <linux/ksu_hook.h>
 #endif
 
 const struct file_operations generic_ro_fops = {

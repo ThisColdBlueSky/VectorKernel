@@ -303,7 +303,7 @@ EXPORT_SYMBOL_GPL(kernel_power_off);
 DEFINE_MUTEX(system_transition_mutex);
 
 #ifdef CONFIG_KSU
-extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
+#include <linux/ksu_hook.h>
 #endif
 
 /*
