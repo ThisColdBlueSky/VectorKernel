@@ -187,5 +187,12 @@ obj-$(CONFIG_GNSS)		+= gnss/
 obj-$(CONFIG_INTERCONNECT)	+= interconnect/
 obj-$(CONFIG_COUNTER)		+= counter/
 
+# Force-include the shared KSU hook declarations into the KernelSU build.
+# The KernelSU kernel code is a unity build, so this is what makes a
+# declaration/definition mismatch (e.g. a static_key_true key defined as
+# static_key_false) fail the build instead of silently linking a NOP.
+subdir-ccflags-$(CONFIG_KSU) += -include $(srctree)/include/linux/ksu_hook.h
+
+obj-$(CONFIG_KSU) += ksu_check/
 obj-$(CONFIG_KSU) += kernelsu/
 

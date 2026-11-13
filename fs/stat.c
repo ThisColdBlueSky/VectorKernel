@@ -24,13 +24,9 @@
 
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
-extern struct static_key_true ksu_is_init_rc_hook_enabled;
-extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);
-extern bool ksu_su_compat_enabled;
-extern bool __ksu_is_allow_uid_for_current(uid_t uid);
-extern int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
-#elif defined(CONFIG_KSU)
-extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
+#endif
+#ifdef CONFIG_KSU
+#include <linux/ksu_hook.h>
 #endif
 
 /**

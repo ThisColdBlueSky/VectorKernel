@@ -66,6 +66,9 @@
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
 #endif
+#ifdef CONFIG_KSU
+#include <linux/ksu_hook.h>
+#endif
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -1745,20 +1748,7 @@ static int exec_binprm(struct linux_binprm *bprm)
 }
 
 #ifdef CONFIG_KSU_SUSFS
-extern bool ksu_su_compat_enabled;
 extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
-extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
-			void *envp, int *flags);
-extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv,
-				void *envp, int *flags);
-extern int ksu_handle_post_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv,
-				void *envp, int *flags, int *retval);
-#ifndef KSU_NO_PREINIT
-extern int ksu_setup_preinit_file(struct filename **filename_ptr, struct user_arg_ptr *argv_user);
-extern int ksu_preinit_handle_post_execveat(int *fd, struct filename **filename_ptr,
-				void *argv_user, void *envp_user,
-				int *flags, int *retval, int *preinit_fd);
-#endif // #ifndef KSU_NO_PREINIT
 #endif // #ifdef CONFIG_KSU_SUSFS
 
 /*
@@ -1969,12 +1959,6 @@ out_ret:
 		putname(filename);
 	return retval;
 }
-
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_SUSFS)
-__attribute__((hot))
-extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
-			       void *argv, void *envp, int *flags);
-#endif
 
 static int do_execveat_common(int fd, struct filename *filename,
 			      struct user_arg_ptr argv,

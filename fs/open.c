@@ -342,13 +342,9 @@ SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
 
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
-extern bool ksu_su_compat_enabled;
-extern bool __ksu_is_allow_uid_for_current(uid_t uid);
-extern int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags);
-#elif defined(CONFIG_KSU)
-__attribute__((hot))
-extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
-				int *mode, int *flags);
+#endif
+#ifdef CONFIG_KSU
+#include <linux/ksu_hook.h>
 #endif
 
 /*
