@@ -1407,7 +1407,7 @@ static void thermal_override_poll_work_fn(struct work_struct *work)
 		guard_skin_enforced = false;
 	}
 
-	new_safe = bms_read_ok && !guard_battery_enforced && !guard_skin_enforced && !!READ_ONCE(ignore_vendor_charging_thermal);
+	new_safe = bms_read_ok && !guard_battery_enforced && !guard_skin_enforced;
 	if (new_safe != prev_safe) {
 		cached_override_safe = new_safe;
 		state_changed = true;
@@ -1475,7 +1475,7 @@ static bool thermal_throttle_enforced(struct batt_chg *chg)
 		enforced = guard_battery_enforced;
 	}
 
-	new_safe = (rc >= 0) && !guard_battery_enforced && !guard_skin_enforced && !!READ_ONCE(ignore_vendor_charging_thermal);
+	new_safe = (rc >= 0) && !guard_battery_enforced && !guard_skin_enforced;
 	if (new_safe != prev_safe) {
 		cached_override_safe = new_safe;
 		state_changed = true;
@@ -1494,9 +1494,6 @@ bool vendor_thermal_override_safe(void)
 	bool safe;
 
 	if (!smp_load_acquire(&thermal_override_initialized))
-		return false;
-
-	if (!READ_ONCE(ignore_vendor_charging_thermal))
 		return false;
 
 	spin_lock_irqsave(&guard_lock, flags);
