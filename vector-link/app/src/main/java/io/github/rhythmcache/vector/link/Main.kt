@@ -1,6 +1,8 @@
 package io.github.rhythmcache.vector.link
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -41,6 +43,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -102,6 +105,42 @@ object VectorNodes {
     )
 }
 
+object VectorDefaults {
+    const val STOP = 0
+    const val RESUME = 0
+    const val BYPASS = 0
+    const val ICL = 0
+    const val IGN_CHG = 0
+    const val VENDOR_MAX = 18
+    const val IGN_CPU = 0
+    const val CPU_LITTLE = 0
+    const val CPU_BIG = 0
+    const val IGN_GPU = 0
+    const val GPU_MAX = 0
+    const val IGN_BL = 0
+    const val TRIP = 450
+    const val CLEAR = 420
+    const val SKIN = 0
+
+    val MAP = mapOf(
+        VectorNodes.STOP to STOP,
+        VectorNodes.RESUME to RESUME,
+        VectorNodes.BYPASS to BYPASS,
+        VectorNodes.ICL to ICL,
+        VectorNodes.IGN_CHG to IGN_CHG,
+        VectorNodes.VENDOR_MAX to VENDOR_MAX,
+        VectorNodes.IGN_CPU to IGN_CPU,
+        VectorNodes.CPU_LITTLE to CPU_LITTLE,
+        VectorNodes.CPU_BIG to CPU_BIG,
+        VectorNodes.IGN_GPU to IGN_GPU,
+        VectorNodes.GPU_MAX to GPU_MAX,
+        VectorNodes.IGN_BL to IGN_BL,
+        VectorNodes.TRIP to TRIP,
+        VectorNodes.CLEAR to CLEAR,
+        VectorNodes.SKIN to SKIN,
+    )
+}
+
 data class Snapshot(
     val nodes: Map<String, Int>,
     val capacity: Int,
@@ -112,6 +151,9 @@ data class Snapshot(
 )
 
 object VectorRepo {
+    const val BOOT_SCRIPT_DIR = "/data/adb/service.d"
+    const val BOOT_SCRIPT_PATH = "/data/adb/service.d/99-vector-link.sh"
+
     // One shell call reads everything.
     private val readScript = buildString {
         VectorNodes.ALL.forEach {
@@ -120,6 +162,7 @@ object VectorRepo {
         listOf("capacity", "status", "current_now", "voltage_now", "temp").forEach {
             append("echo \"b:$it=\$(cat ${VectorNodes.BATT}/$it 2>/dev/null)\"\n")
         }
+        append("if [ -f $BOOT_SCRIPT_PATH ]; then echo \"boot:installed=1\"; else echo \"boot:installed=0\"; fi\n")
     }
 
     suspend fun hasRoot(): Boolean = withContext(Dispatchers.IO) { Shell.getShell().isRoot }
@@ -128,10 +171,11 @@ object VectorRepo {
         Shell.getCachedShell()?.close()
     }
 
-    suspend fun read(): Snapshot = withContext(Dispatchers.IO) {
+    suspend fun read(): Pair<Snapshot, Boolean> = withContext(Dispatchers.IO) {
         val out = Shell.cmd(readScript).exec().out
         val nodes = HashMap<String, Int>()
         val batt = HashMap<String, String>()
+        var bootInstalled = false
         for (line in out) {
             val eq = line.indexOf('=')
             if (eq < 2) continue
@@ -142,20 +186,110 @@ object VectorRepo {
                 line.startsWith("n:") ->
                     value.split(" ").firstOrNull()?.toIntOrNull()?.let { nodes[key] = it }
                 line.startsWith("b:") -> batt[key] = value
+                line.startsWith("boot:") -> bootInstalled = (value == "1")
             }
         }
-        Snapshot(
-            nodes = nodes,
-            capacity = batt["capacity"]?.toIntOrNull() ?: 0,
-            status = batt["status"].orEmpty(),
-            currentUa = batt["current_now"]?.toLongOrNull() ?: 0L,
-            voltageUv = batt["voltage_now"]?.toLongOrNull() ?: 0L,
-            tempDeci = batt["temp"]?.toIntOrNull() ?: 0,
+        Pair(
+            Snapshot(
+                nodes = nodes,
+                capacity = batt["capacity"]?.toIntOrNull() ?: 0,
+                status = batt["status"].orEmpty(),
+                currentUa = batt["current_now"]?.toLongOrNull() ?: 0L,
+                voltageUv = batt["voltage_now"]?.toLongOrNull() ?: 0L,
+                tempDeci = batt["temp"]?.toIntOrNull() ?: 0,
+            ),
+            bootInstalled
         )
     }
 
     suspend fun write(node: String, value: String): Boolean = withContext(Dispatchers.IO) {
         Shell.cmd("echo \"$value\" > ${VectorNodes.DIR}/$node").exec().isSuccess
+    }
+
+    suspend fun restoreDefaults(): Boolean = withContext(Dispatchers.IO) {
+        val script = buildString {
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.STOP}\n")
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.BYPASS}\n")
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.ICL}\n")
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.IGN_CHG}\n")
+            append("echo 18 > ${VectorNodes.DIR}/${VectorNodes.VENDOR_MAX}\n")
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.IGN_CPU}\n")
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.CPU_LITTLE}\n")
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.CPU_BIG}\n")
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.IGN_GPU}\n")
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.GPU_MAX}\n")
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.IGN_BL}\n")
+            append("echo 450 > ${VectorNodes.DIR}/${VectorNodes.TRIP}\n")
+            append("echo 420 > ${VectorNodes.DIR}/${VectorNodes.CLEAR}\n")
+            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.SKIN}\n")
+        }
+        Shell.cmd(script).exec().isSuccess
+    }
+
+    suspend fun applyOnBoot(snap: Snapshot): Boolean = withContext(Dispatchers.IO) {
+        val n = snap.nodes
+        val stop = n[VectorNodes.STOP] ?: 0
+        val resume = n[VectorNodes.RESUME] ?: 0
+        val bypass = n[VectorNodes.BYPASS] ?: 0
+        val icl = n[VectorNodes.ICL] ?: 0
+        val ignChg = n[VectorNodes.IGN_CHG] ?: 0
+        val vendorMax = n[VectorNodes.VENDOR_MAX] ?: 18
+        val ignCpu = n[VectorNodes.IGN_CPU] ?: 0
+        val cpuLittle = n[VectorNodes.CPU_LITTLE] ?: 0
+        val cpuBig = n[VectorNodes.CPU_BIG] ?: 0
+        val ignGpu = n[VectorNodes.IGN_GPU] ?: 0
+        val gpuMax = n[VectorNodes.GPU_MAX] ?: 0
+        val ignBl = n[VectorNodes.IGN_BL] ?: 0
+        val trip = n[VectorNodes.TRIP] ?: 450
+        val clear = n[VectorNodes.CLEAR] ?: 420
+        val skin = n[VectorNodes.SKIN] ?: 0
+
+        val scriptBody = buildString {
+            append("#!/system/bin/sh\n")
+            append("# Vector Link - Auto-applied boot settings\n")
+            append("# Generated automatically\n\n")
+            append("VDIR=\"/sys/kernel/vector\"\n\n")
+            append("# Wait for vector sysfs node\n")
+            append("for i in \$(seq 1 60); do\n")
+            append("    if [ -d \"\$VDIR\" ]; then\n")
+            append("        break\n")
+            append("    fi\n")
+            append("    sleep 1\n")
+            append("done\n\n")
+            append("if [ ! -d \"\$VDIR\" ]; then\n")
+            append("    exit 0\n")
+            append("fi\n\n")
+            if (stop > 0) {
+                append("echo \"$stop $resume\" > \"\$VDIR/${VectorNodes.STOP}\"\n")
+            } else {
+                append("echo 0 > \"\$VDIR/${VectorNodes.STOP}\"\n")
+            }
+            append("echo $bypass > \"\$VDIR/${VectorNodes.BYPASS}\"\n")
+            append("echo $icl > \"\$VDIR/${VectorNodes.ICL}\"\n")
+            append("echo $ignChg > \"\$VDIR/${VectorNodes.IGN_CHG}\"\n")
+            append("echo $vendorMax > \"\$VDIR/${VectorNodes.VENDOR_MAX}\"\n")
+            append("echo $ignCpu > \"\$VDIR/${VectorNodes.IGN_CPU}\"\n")
+            append("echo $cpuLittle > \"\$VDIR/${VectorNodes.CPU_LITTLE}\"\n")
+            append("echo $cpuBig > \"\$VDIR/${VectorNodes.CPU_BIG}\"\n")
+            append("echo $ignGpu > \"\$VDIR/${VectorNodes.IGN_GPU}\"\n")
+            append("echo $gpuMax > \"\$VDIR/${VectorNodes.GPU_MAX}\"\n")
+            append("echo $ignBl > \"\$VDIR/${VectorNodes.IGN_BL}\"\n")
+            append("echo $trip > \"\$VDIR/${VectorNodes.TRIP}\"\n")
+            append("echo $clear > \"\$VDIR/${VectorNodes.CLEAR}\"\n")
+            append("echo $skin > \"\$VDIR/${VectorNodes.SKIN}\"\n")
+        }
+
+        val cmd = "mkdir -p $BOOT_SCRIPT_DIR\n" +
+                "cat << 'EOF' > $BOOT_SCRIPT_PATH\n" +
+                scriptBody +
+                "EOF\n" +
+                "chmod 0755 $BOOT_SCRIPT_PATH\n" +
+                "chown root:root $BOOT_SCRIPT_PATH\n"
+        Shell.cmd(cmd).exec().isSuccess
+    }
+
+    suspend fun removeBootScript(): Boolean = withContext(Dispatchers.IO) {
+        Shell.cmd("rm -f $BOOT_SCRIPT_PATH").exec().isSuccess
     }
 }
 
@@ -169,6 +303,8 @@ data class UiState(
     val gate: Gate = Gate.Loading,
     val snap: Snapshot? = null,
     val error: String? = null,
+    val infoMessage: String? = null,
+    val isBootApplied: Boolean = false,
 )
 
 private class Pending(val value: Int, val until: Long)
@@ -202,6 +338,7 @@ class VectorViewModel : ViewModel() {
     }
 
     fun dismissError() = _state.update { it.copy(error = null) }
+    fun dismissInfo() = _state.update { it.copy(infoMessage = null) }
 
     private suspend fun refreshLocked() {
         val gate = _state.value.gate
@@ -210,10 +347,10 @@ class VectorViewModel : ViewModel() {
             _state.update { it.copy(gate = Gate.NoRoot) }
             return
         }
-        val snap = VectorRepo.read()
+        val (snap, bootInstalled) = VectorRepo.read()
         if (snap.nodes.isEmpty()) {
             // Nothing readable under /sys/kernel/vector. Keeps retrying on every poll.
-            _state.update { it.copy(gate = Gate.NoNodes, snap = null) }
+            _state.update { it.copy(gate = Gate.NoNodes, snap = null, isBootApplied = bootInstalled) }
             return
         }
 
@@ -230,7 +367,7 @@ class VectorViewModel : ViewModel() {
                 merged[e.key] = e.value.value
             }
         }
-        _state.update { it.copy(gate = Gate.Ready, snap = snap.copy(nodes = merged)) }
+        _state.update { it.copy(gate = Gate.Ready, snap = snap.copy(nodes = merged), isBootApplied = bootInstalled) }
     }
 
     private fun write(node: String, value: String, expected: Map<String, Int>) {
@@ -269,6 +406,65 @@ class VectorViewModel : ViewModel() {
         VectorNodes.STOP, "$stop $resume",
         mapOf(VectorNodes.STOP to stop, VectorNodes.RESUME to resume),
     )
+
+    fun restoreDefaults() {
+        viewModelScope.launch {
+            mutex.withLock {
+                VectorDefaults.MAP.forEach { (k, v) ->
+                    pending[k] = Pending(v, SystemClock.elapsedRealtime() + 3000)
+                }
+                _state.update { s ->
+                    s.snap?.let { s.copy(snap = it.copy(nodes = it.nodes + VectorDefaults.MAP)) } ?: s
+                }
+                val ok = VectorRepo.restoreDefaults()
+                if (ok) {
+                    _state.update { it.copy(infoMessage = "Default kernel settings restored successfully.", error = null) }
+                } else {
+                    _state.update { it.copy(error = "Failed to restore kernel default settings.") }
+                }
+                refreshLocked()
+            }
+        }
+    }
+
+    fun applyOnBoot() {
+        viewModelScope.launch {
+            val snap = _state.value.snap ?: return@launch
+            val ok = VectorRepo.applyOnBoot(snap)
+            if (ok) {
+                _state.update {
+                    it.copy(
+                        isBootApplied = true,
+                        infoMessage = "Current settings written to /data/adb/service.d/99-vector-link.sh",
+                        error = null,
+                    )
+                }
+            } else {
+                _state.update {
+                    it.copy(error = "Failed to write boot script to Magisk service.d directory.")
+                }
+            }
+        }
+    }
+
+    fun removeBootScript() {
+        viewModelScope.launch {
+            val ok = VectorRepo.removeBootScript()
+            if (ok) {
+                _state.update {
+                    it.copy(
+                        isBootApplied = false,
+                        infoMessage = "Boot script removed from service.d.",
+                        error = null,
+                    )
+                }
+            } else {
+                _state.update {
+                    it.copy(error = "Failed to remove boot script.")
+                }
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -318,12 +514,22 @@ private val DISCLAIMER_TEXT = """
 
     You are fully responsible for every value you change. Don't leave the phone unattended while charging with overrides enabled, don't raise the trip temperature casually, and turn an override off if the device gets unusually hot.
 
-    Settings are not saved by the kernel: everything returns to its default after a reboot.
+    Settings are not saved by the kernel: everything returns to its default after a reboot unless saved with the Apply on Boot feature.
 
     The developer is not liable for any damage, data loss, fire, injury, or warranty issues caused by using this app. Use at your own risk.
 
     Tap the ⓘ icon next to any setting to see what it does and an example.
 """.trimIndent()
+
+fun openUrl(context: Context, url: String) {
+    try {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    } catch (_: Exception) {
+    }
+}
 
 data class HelpInfo(
     val title: String,
@@ -440,7 +646,50 @@ fun App(vm: VectorViewModel) {
         }
     }
 
-    Scaffold { pad ->
+    Scaffold(
+        bottomBar = {
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 3.dp,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(
+                        onClick = {
+                            openUrl(context, "https://github.com/ThisColdBlueSky/VectorKernel")
+                        }
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_github),
+                            contentDescription = "Kernel GitHub Repository",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(26.dp),
+                        )
+                    }
+                    Spacer(Modifier.width(36.dp))
+                    IconButton(
+                        onClick = {
+                            openUrl(context, "https://t.me/tr1ple_fault")
+                        }
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_telegram),
+                            contentDescription = "Telegram Channel",
+                            tint = Color(0xFF29B6F6),
+                            modifier = Modifier.size(26.dp),
+                        )
+                    }
+                }
+            }
+        }
+    ) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
             when (s.gate) {
                 Gate.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
@@ -454,7 +703,15 @@ fun App(vm: VectorViewModel) {
                     "Nothing could be read from ${VectorNodes.DIR}. This app only works on a Vector kernel that exposes these controls.",
                     vm::retry,
                 )
-                Gate.Ready -> s.snap?.let { Dashboard(it, s.error, vm) }
+                Gate.Ready -> s.snap?.let {
+                    Dashboard(
+                        snap = it,
+                        error = s.error,
+                        infoMessage = s.infoMessage,
+                        isBootApplied = s.isBootApplied,
+                        vm = vm,
+                    )
+                }
             }
         }
     }
@@ -480,7 +737,13 @@ fun Message(title: String, body: String, onRetry: () -> Unit) {
 // ============================================================
 
 @Composable
-fun Dashboard(snap: Snapshot, error: String?, vm: VectorViewModel) {
+fun Dashboard(
+    snap: Snapshot,
+    error: String?,
+    infoMessage: String?,
+    isBootApplied: Boolean,
+    vm: VectorViewModel,
+) {
     val n = snap.nodes
     fun has(k: String) = k in n
     fun on(k: String) = (n[k] ?: 0) != 0
@@ -518,6 +781,26 @@ fun Dashboard(snap: Snapshot, error: String?, vm: VectorViewModel) {
                         modifier = Modifier.weight(1f),
                     )
                     TextButton(onClick = vm::dismissError) { Text("Dismiss") }
+                }
+            }
+        }
+
+        if (infoMessage != null) item {
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer,
+                shape = MaterialTheme.shapes.medium,
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        infoMessage,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = vm::dismissInfo) { Text("OK") }
                 }
             }
         }
@@ -770,12 +1053,109 @@ fun Dashboard(snap: Snapshot, error: String?, vm: VectorViewModel) {
             }
         }
 
+        // ---------- Settings & Persistence ----------
+        item {
+            var showRestoreConfirm by remember { mutableStateOf(false) }
+
+            Section(
+                title = "Settings & Persistence",
+                subtitle = "Save current settings to apply automatically on boot, or reset to kernel defaults.",
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        if (isBootApplied)
+                            "Boot script is active at /data/adb/service.d/99-vector-link.sh. Settings will be applied on every boot."
+                        else
+                            "Settings are runtime-only by default and reset on reboot. Writing a script to Magisk service.d persists them automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Button(
+                            onClick = vm::applyOnBoot,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(if (isBootApplied) "Update Boot Script" else "Apply on Boot")
+                        }
+                        if (isBootApplied) {
+                            OutlinedButton(
+                                onClick = vm::removeBootScript,
+                            ) {
+                                Text("Remove")
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Restore Default Settings",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "Revert all charging, thermal, and guardrail limits to factory kernel defaults.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedButton(
+                        onClick = { showRestoreConfirm = true },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) {
+                        Text("Restore")
+                    }
+                }
+
+                if (showRestoreConfirm) {
+                    AlertDialog(
+                        onDismissRequest = { showRestoreConfirm = false },
+                        title = { Text("Restore Default Settings?") },
+                        text = {
+                            Text(
+                                "This will reset all charging limits, bypass mode, thermal overrides, and temperature guardrails back to factory kernel defaults."
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    showRestoreConfirm = false
+                                    vm.restoreDefaults()
+                                }
+                            ) {
+                                Text("Restore Defaults", color = MaterialTheme.colorScheme.error)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showRestoreConfirm = false }) {
+                                Text("Cancel")
+                            }
+                        },
+                    )
+                }
+            }
+        }
+
         item {
             Text(
-                "Changes apply immediately and reset to kernel defaults after a reboot.",
+                "Changes apply immediately. Tap icons below for kernel repo and Telegram channel.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 textAlign = TextAlign.Center,
             )
         }
