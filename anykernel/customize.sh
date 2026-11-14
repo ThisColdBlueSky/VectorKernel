@@ -6,7 +6,6 @@ ui_print "***************************************************"
 ui_print "               Vector Kernel Flasher               "
 ui_print "     POCO X4 Pro 5G / Redmi Note 11 Pro 5G         "
 ui_print "                 (veux / peux)                     "
-ui_print "         by THIS COLD BLUE SKY & rhythmcache       "
 ui_print "***************************************************"
 ui_print ""
 

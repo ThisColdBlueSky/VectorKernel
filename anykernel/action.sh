@@ -9,7 +9,7 @@ MODDIR="$(dirname "$(readlink -f "$0")")"
 echo "***************************************************"
 echo "             Vector Kernel Action Menu             "
 echo "     POCO X4 Pro 5G / Redmi Note 11 Pro 5G         "
-echo "         by THIS COLD BLUE SKY & rhythmcache       "
+echo "                 (veux / peux)                     "
 echo "***************************************************"
 echo ""
 
