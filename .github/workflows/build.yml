@@ -394,6 +394,20 @@ jobs:
             - **Branch:** `${{ github.ref_name }}`
             - **Kernel Release:** `5.4.302~Vector`
             
+            ### Highlights & Changelog:
+            - **[Maple Tree](https://docs.kernel.org/core-api/maple_tree.html) backport**: Modern memory management structure backported from Linux 6.1 for faster app switching and smoother multitasking.
+            - **[TCP BBRv3](https://github.com/google/bbr)**: Latest congestion control algorithm set as default for lower network latency and faster download speeds.
+            - **Integrated [SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)**: Next-gen KernelSU implementation with built-in [SUSFS v2.4.0](https://gitlab.com/simonpunk/susfs4ksu) stealth hooks and [KernelPatch (KPM)](https://github.com/bmax121/KernelPatch) support.
+            - **Battery charge limiter**: Pause charging at a custom percentage (e.g. 80%) with automatic resume threshold to preserve battery lifespan.
+            - **Bypass charging**: Power device hardware directly from USB power while gaming to prevent battery heating.
+            - **USB current override**: Boost slow 500 mA USB charging ports up to 1500 mA.
+            - **Independent thermal controls**: Safely bypass aggressive vendor throttling for charging, CPU, GPU, and display brightness independently, protected by battery and chassis temperature safety trips ([read documentation](https://github.com/ThisColdBlueSky/VectorKernel/blob/main/Documentation/vector.md)).
+            - **ARM64 NEON [LZ4](https://github.com/lz4/lz4)**: Accelerated decompression on Cortex-A55 cores for faster zram swapping and app launch times.
+            - **Optimized network checksums**: Hardware-accelerated IP/IPv6 routines for faster packet processing.
+            - **Fixed microphone & audio**: Resolved soundcard naming conflict in audio DTS for crystal clear audio HAL recording.
+            - **[Vector Link](https://github.com/ThisColdBlueSky/VectorKernel/tree/main/vector-link) companion app**: Clean Material 3 app with real-time battery wattage gauge, safety dialogs, and automatic boot persistence via `/data/adb/service.d`.
+            - **Universal Dual-Installer**: Flashable seamlessly in custom recovery OR directly as a Magisk / KernelSU module with automated boot backups and slot management.
+
             ### Flashing Instructions:
             - **Universal Dual-Installer**: Can be flashed in **both Recovery** and **KernelSU / Magisk**.
             - When flashed as a KernelSU / Magisk module:
@@ -401,6 +415,6 @@ jobs:
               - Registers an **Action** button in the module manager to easily reflash slots or restore your previous kernel at any time.
             
             ### Included Packages:
-            - **`Vector-veux-YYYYMMDD.zip`**: Clean kernel.
-            - **`Vector-veux-YYYYMMDD-KSU.zip`**: KernelSU root support pre-compiled into `Image`.
+            - **`Vector-veux-YYYYMMDD.zip`**: Clean kernel without root.
+            - **`Vector-veux-YYYYMMDD-KSU.zip`**: KernelSU (SukiSU-Ultra) root support pre-compiled into `Image`.
             - **`vector-link-release.apk`**: Vector Link companion app.
