@@ -56,7 +56,7 @@ ensure_block_rw() {
     local blk="$1"
     if [ -b "$blk" ]; then
         if [ "$(blockdev --getro "$blk" 2>/dev/null)" = "1" ]; then
-            ui_print "    ! Partition $(basename "$blk") is Read-Only. Setting to Read-Write..."
+            ui_print "- Setting partition $(basename "$blk") to Read-Write..."
             blockdev --setrw "$blk" 2>/dev/null
         fi
     fi
@@ -65,10 +65,10 @@ ensure_block_rw() {
 # --- STEP 1: Slot Selection ---
 ui_print "- Current active slot: $CURRENT_SLOT"
 ui_print ""
-ui_print "- [?] Select Target Slot to Flash:"
-ui_print "    Press VOLUME UP   (+) => Active Slot only ($CURRENT_SLOT)"
-ui_print "    Press VOLUME DOWN (-) => Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
-ui_print "    (Waiting 10s... defaults to Active Slot)"
+ui_print "- Select target slot to flash:"
+ui_print "  - Press VOLUME UP   (+) for Active Slot only ($CURRENT_SLOT)"
+ui_print "  - Press VOLUME DOWN (-) for Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
+ui_print "  (Waiting 10s... defaults to Active Slot)"
 ui_print ""
 
 TARGET_SLOTS="$CURRENT_SLOT"
@@ -76,19 +76,19 @@ choose_key 10
 key_slot=$?
 
 if [ $key_slot -eq 2 ]; then
-    ui_print "=> Selected: Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
+    ui_print "- Selected: Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
     TARGET_SLOTS="$CURRENT_SLOT $OTHER_SLOT"
 else
-    ui_print "=> Selected: Active Slot only ($CURRENT_SLOT)"
+    ui_print "- Selected: Active Slot only ($CURRENT_SLOT)"
     TARGET_SLOTS="$CURRENT_SLOT"
 fi
 ui_print ""
 
 # --- STEP 2: Backup Selection ---
-ui_print "- [?] Backup Current Kernel Partitions?"
-ui_print "    Press VOLUME UP   (+) => YES (Backup to /data/adb & /sdcard)"
-ui_print "    Press VOLUME DOWN (-) => NO  (Skip backup)"
-ui_print "    (Waiting 10s... defaults to YES)"
+ui_print "- Backup current kernel partitions?"
+ui_print "  - Press VOLUME UP   (+) for YES (Backup to /data/adb & /sdcard)"
+ui_print "  - Press VOLUME DOWN (-) for NO  (Skip backup)"
+ui_print "  (Waiting 10s... defaults to YES)"
 ui_print ""
 
 choose_key 10
@@ -99,32 +99,32 @@ SDCARD_DIR="/data/media/0/Vector_Backups"
 [ -d /sdcard ] && SDCARD_DIR="/sdcard/Vector_Backups"
 
 if [ $key_backup -ne 2 ]; then
-    ui_print "=> Backing up current partitions..."
+    ui_print "- Backing up current partitions..."
     mkdir -p "$BACKUP_DIR"
     mkdir -p "$SDCARD_DIR" 2>/dev/null
     echo "$CURRENT_SLOT" > "$BACKUP_DIR/slot.info"
 
     for s in $TARGET_SLOTS; do
         if [ -b "/dev/block/by-name/boot$s" ]; then
-            ui_print "   - Backing up boot$s..."
+            ui_print "  - Backing up boot$s..."
             dd if="/dev/block/by-name/boot$s" of="$BACKUP_DIR/boot$s.img" bs=4M 2>/dev/null
             cp -f "$BACKUP_DIR/boot$s.img" "$SDCARD_DIR/" 2>/dev/null
         fi
         if [ -b "/dev/block/by-name/vendor_boot$s" ]; then
-            ui_print "   - Backing up vendor_boot$s..."
+            ui_print "  - Backing up vendor_boot$s..."
             dd if="/dev/block/by-name/vendor_boot$s" of="$BACKUP_DIR/vendor_boot$s.img" bs=4M 2>/dev/null
             cp -f "$BACKUP_DIR/vendor_boot$s.img" "$SDCARD_DIR/" 2>/dev/null
         fi
         if [ -b "/dev/block/by-name/dtbo$s" ]; then
-            ui_print "   - Backing up dtbo$s..."
+            ui_print "  - Backing up dtbo$s..."
             dd if="/dev/block/by-name/dtbo$s" of="$BACKUP_DIR/dtbo$s.img" bs=4M 2>/dev/null
             cp -f "$BACKUP_DIR/dtbo$s.img" "$SDCARD_DIR/" 2>/dev/null
         fi
     done
     ui_print "- Backup saved to $BACKUP_DIR"
-    ui_print "  (Copy also saved to /sdcard/Vector_Backups/)"
+    ui_print "- Copy also saved to /sdcard/Vector_Backups/"
 else
-    ui_print "=> Backup skipped by user."
+    ui_print "- Backup skipped by user"
 fi
 ui_print ""
 
@@ -147,14 +147,14 @@ for slot in $TARGET_SLOTS; do
 
     # Flash boot partition
     if [ -b "$BOOT_BLK" ] && [ -f "$MODPATH/Image" ]; then
-        ui_print "  * Flashing kernel Image into boot$slot..."
+        ui_print "- Flashing kernel Image into boot$slot..."
         cd "$WORK_DIR" && rm -rf *
         "$MB" unpack "$BOOT_BLK" >/dev/null 2>&1
         cp -f "$MODPATH/Image" kernel
         "$MB" repack "$BOOT_BLK" new-boot.img >/dev/null 2>&1
         if [ -f new-boot.img ]; then
             dd if=new-boot.img of="$BOOT_BLK" bs=4M conv=fsync 2>/dev/null
-            ui_print "    -> boot$slot updated successfully."
+            ui_print "- boot$slot updated successfully"
         else
             abort "! Failed to repack boot$slot. Aborting."
         fi
@@ -163,14 +163,14 @@ for slot in $TARGET_SLOTS; do
     # Flash vendor_boot partition
     VBOOT_BLK="/dev/block/by-name/vendor_boot$slot"
     if [ -b "$VBOOT_BLK" ] && [ -f "$MODPATH/dtb" ]; then
-        ui_print "  * Flashing DTB into vendor_boot$slot..."
+        ui_print "- Flashing DTB into vendor_boot$slot..."
         cd "$WORK_DIR" && rm -rf *
         "$MB" unpack "$VBOOT_BLK" >/dev/null 2>&1
         cp -f "$MODPATH/dtb" dtb
         "$MB" repack "$VBOOT_BLK" new-vendor_boot.img >/dev/null 2>&1
         if [ -f new-vendor_boot.img ]; then
             dd if=new-vendor_boot.img of="$VBOOT_BLK" bs=4M conv=fsync 2>/dev/null
-            ui_print "    -> vendor_boot$slot updated successfully."
+            ui_print "- vendor_boot$slot updated successfully"
         else
             abort "! Failed to repack vendor_boot$slot. Aborting."
         fi
@@ -179,7 +179,7 @@ for slot in $TARGET_SLOTS; do
     # Erase DTBO partition
     DTBO_BLK="/dev/block/by-name/dtbo$slot"
     if [ -b "$DTBO_BLK" ]; then
-        ui_print "  * Erasing dtbo$slot..."
+        ui_print "- Erasing dtbo$slot..."
         DTBO_SIZE=$(blockdev --getsize64 "$DTBO_BLK" 2>/dev/null)
         if [ -n "$DTBO_SIZE" ] && [ "$DTBO_SIZE" -gt 0 ]; then
             dd if=/dev/zero of="$DTBO_BLK" count=1 bs="$DTBO_SIZE" conv=fsync 2>/dev/null
@@ -204,13 +204,11 @@ ui_print "***************************************************"
 ui_print "      Vector Kernel installed successfully!        "
 ui_print "***************************************************"
 ui_print ""
-ui_print "- Flashed directly to kernel partitions."
-ui_print "- Module active: Action button enabled in manager!"
-ui_print "  (Use Action button to reflash slots or restore)"
-ui_print "- Your previous partitions are backed up safely at:"
-ui_print "  /sdcard/Vector_Backups/"
+ui_print "- Flashed directly to kernel partitions"
+ui_print "- Module active: Action button enabled in manager"
+ui_print "- Backups saved safely to /sdcard/Vector_Backups/"
 ui_print ""
-ui_print "- Please reboot your device now."
+ui_print "- Please reboot your device now"
 ui_print ""
 
 exit 0
