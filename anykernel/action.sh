@@ -74,12 +74,15 @@ case "$1" in
 esac
 
 case "$2" in
-    *both*)  TARGET_SLOTS="$CURRENT_SLOT $OTHER_SLOT" ;;
-    *a*)     TARGET_SLOTS="_a" ;;
-    *b*)     TARGET_SLOTS="_b" ;;
+    *both*)             TARGET_SLOTS="$CURRENT_SLOT $OTHER_SLOT" ;;
+    *inactive*|*other*) TARGET_SLOTS="$OTHER_SLOT" ;;
+    *active*)           TARGET_SLOTS="$CURRENT_SLOT" ;;
+    *a*)                TARGET_SLOTS="_a" ;;
+    *b*)                TARGET_SLOTS="_b" ;;
 esac
 
 echo "- Current active slot: $CURRENT_SLOT"
+echo "- Inactive (OTA) slot: $OTHER_SLOT"
 echo ""
 
 # Interactive Action Selection if not specified via CLI
@@ -107,8 +110,8 @@ fi
 if [ -z "$TARGET_SLOTS" ]; then
     echo ""
     echo "- Select target slot:"
-    echo "  - Press VOLUME UP   (+) for Active Slot only ($CURRENT_SLOT)"
-    echo "  - Press VOLUME DOWN (-) for Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
+    echo "  - Press VOLUME UP   (+) for Active Slot ($CURRENT_SLOT)"
+    echo "  - Press VOLUME DOWN (-) for Inactive or Both Slots..."
     echo "  (Waiting 15s... defaults to Active Slot)"
     echo ""
 
@@ -116,8 +119,21 @@ if [ -z "$TARGET_SLOTS" ]; then
     key_slot=$?
 
     if [ $key_slot -eq 2 ]; then
-        echo "- Selected: Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
-        TARGET_SLOTS="$CURRENT_SLOT $OTHER_SLOT"
+        echo "- Choose target slot:"
+        echo "  - Press VOLUME UP   (+) for Inactive Slot ($OTHER_SLOT - post-OTA)"
+        echo "  - Press VOLUME DOWN (-) for Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
+        echo "  (Waiting 15s... defaults to Inactive Slot)"
+        echo ""
+
+        choose_key 15
+        key_sub=$?
+        if [ $key_sub -eq 2 ]; then
+            echo "- Selected: Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
+            TARGET_SLOTS="$CURRENT_SLOT $OTHER_SLOT"
+        else
+            echo "- Selected: Inactive Slot only ($OTHER_SLOT)"
+            TARGET_SLOTS="$OTHER_SLOT"
+        fi
     else
         echo "- Selected: Active Slot only ($CURRENT_SLOT)"
         TARGET_SLOTS="$CURRENT_SLOT"

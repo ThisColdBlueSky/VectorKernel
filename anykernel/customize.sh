@@ -64,10 +64,11 @@ ensure_block_rw() {
 
 # --- STEP 1: Slot Selection ---
 ui_print "- Current active slot: $CURRENT_SLOT"
+ui_print "- Inactive (OTA) slot: $OTHER_SLOT"
 ui_print ""
 ui_print "- Select target slot to flash:"
-ui_print "  - Press VOLUME UP   (+) for Active Slot only ($CURRENT_SLOT)"
-ui_print "  - Press VOLUME DOWN (-) for Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
+ui_print "  - Press VOLUME UP   (+) for Active Slot ($CURRENT_SLOT)"
+ui_print "  - Press VOLUME DOWN (-) for Inactive or Both Slots..."
 ui_print "  (Waiting 10s... defaults to Active Slot)"
 ui_print ""
 
@@ -76,8 +77,21 @@ choose_key 10
 key_slot=$?
 
 if [ $key_slot -eq 2 ]; then
-    ui_print "- Selected: Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
-    TARGET_SLOTS="$CURRENT_SLOT $OTHER_SLOT"
+    ui_print "- Choose target slot:"
+    ui_print "  - Press VOLUME UP   (+) for Inactive Slot ($OTHER_SLOT - post-OTA)"
+    ui_print "  - Press VOLUME DOWN (-) for Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
+    ui_print "  (Waiting 10s... defaults to Inactive Slot)"
+    ui_print ""
+
+    choose_key 10
+    key_sub=$?
+    if [ $key_sub -eq 2 ]; then
+        ui_print "- Selected: Both Slots ($CURRENT_SLOT & $OTHER_SLOT)"
+        TARGET_SLOTS="$CURRENT_SLOT $OTHER_SLOT"
+    else
+        ui_print "- Selected: Inactive Slot only ($OTHER_SLOT)"
+        TARGET_SLOTS="$OTHER_SLOT"
+    fi
 else
     ui_print "- Selected: Active Slot only ($CURRENT_SLOT)"
     TARGET_SLOTS="$CURRENT_SLOT"
