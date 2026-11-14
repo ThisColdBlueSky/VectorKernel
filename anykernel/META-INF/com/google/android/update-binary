@@ -9,15 +9,11 @@ BOOTMODE=false;
 ps | grep zygote | grep -v grep >/dev/null && BOOTMODE=true;
 $BOOTMODE || ps -A 2>/dev/null | grep zygote | grep -v grep >/dev/null && BOOTMODE=true;
 
-# If running inside Magisk / KernelSU / APatch Manager app:
+# Magisk module install
 if $BOOTMODE; then
-  for util in /data/adb/magisk/util_functions.sh /data/adb/ksu/util_functions.sh /data/adb/ap/util_functions.sh; do
-    if [ -f "$util" ]; then
-      . "$util"
-      install_module
-      exit 0
-    fi
-  done
+  . /data/adb/magisk/util_functions.sh
+  install_module
+  exit 0
 fi
 
 DIR=/sdcard;
