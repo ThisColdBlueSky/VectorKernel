@@ -4,7 +4,7 @@
 ### AnyKernel setup
 # global properties
 properties() { '
-kernel.string=e+ kernel by dereference
+kernel.string=Vector Kernel for POCO X4 Pro 5G (veux/peux)
 do.devicecheck=1
 do.cleanup=1
 device.name1=veux

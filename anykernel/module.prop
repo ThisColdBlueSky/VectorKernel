@@ -1,0 +1,6 @@
+id=vector_kernel
+name=Vector Kernel
+version=5.4.302~Vector
+versionCode=504302
+author=rhythmcache
+description=Vector Kernel for POCO X4 Pro 5G / Redmi Note 11 Pro 5G (veux/peux). Dual-installer supporting Recovery & Magisk/KernelSU with auto-backup & Action menu.

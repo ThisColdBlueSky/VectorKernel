@@ -219,9 +219,22 @@ jobs:
           cp out/arch/arm64/boot/Image "$PACKAGE_DIR"/Image
           cp "$DTB_PATH" "$PACKAGE_DIR"/dtb
 
+          # Dynamically set version with commit string in module.prop
+          SHORT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "${GITHUB_SHA:0:7}")
+          if [ "$VARIANT" = "ksu" ]; then
+            MOD_VER="5.4.302~Vector-${SHORT_SHA}-KSU"
+          else
+            MOD_VER="5.4.302~Vector-${SHORT_SHA}"
+          fi
+          if [ -f "$PACKAGE_DIR/module.prop" ]; then
+            sed -i "s/^version=.*/version=${MOD_VER}/" "$PACKAGE_DIR/module.prop"
+          fi
+
           chmod +x "$PACKAGE_DIR"/anykernel.sh \
                    "$PACKAGE_DIR"/META-INF/com/google/android/update-binary \
-                   "$PACKAGE_DIR"/tools/* 2>/dev/null || true
+                   "$PACKAGE_DIR"/tools/* \
+                   "$PACKAGE_DIR"/customize.sh \
+                   "$PACKAGE_DIR"/action.sh 2>/dev/null || true
 
           cd "$PACKAGE_DIR"
           zip -r9 "../${ZIP_NAME}" * -x ".git*" "README.md"
@@ -312,6 +325,12 @@ jobs:
             - **Commit:** `${{ github.sha }}`
             - **Branch:** `${{ github.ref_name }}`
             - **Kernel Release:** `5.4.302~Vector`
+            
+            ### Flashing Instructions:
+            - **Universal Dual-Installer**: Can be flashed in **both Recovery** and **KernelSU / Magisk**.
+            - When flashed as a KernelSU / Magisk module:
+              - Automatically backs up your current kernel (`boot`, `vendor_boot`, `dtbo`) to `/sdcard/Vector_Backups/` and `/data/adb/vector_kernel_backup/`.
+              - Registers an **Action** button in the module manager to easily reflash slots or restore your previous kernel at any time.
             
             ### Included Packages:
             - **`Vector-veux-YYYYMMDD.zip`**: Clean kernel.
