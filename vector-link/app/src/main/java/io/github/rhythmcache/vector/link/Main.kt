@@ -388,6 +388,9 @@ class VectorViewModel : ViewModel() {
                     )
                 }
                 refreshLocked()
+                if (ok && _state.value.isBootApplied) {
+                    _state.value.snap?.let { VectorRepo.applyOnBoot(it) }
+                }
             }
         }
     }
@@ -423,6 +426,9 @@ class VectorViewModel : ViewModel() {
                     _state.update { it.copy(error = "Failed to restore kernel default settings.") }
                 }
                 refreshLocked()
+                if (ok && _state.value.isBootApplied) {
+                    _state.value.snap?.let { VectorRepo.applyOnBoot(it) }
+                }
             }
         }
     }
@@ -435,7 +441,7 @@ class VectorViewModel : ViewModel() {
                 _state.update {
                     it.copy(
                         isBootApplied = true,
-                        infoMessage = "Current settings written to /data/adb/service.d/99-vector-link.sh",
+                        infoMessage = "Boot script enabled: settings will automatically apply on boot and update dynamically with any change.",
                         error = null,
                     )
                 }
@@ -454,7 +460,7 @@ class VectorViewModel : ViewModel() {
                 _state.update {
                     it.copy(
                         isBootApplied = false,
-                        infoMessage = "Boot script removed from service.d.",
+                        infoMessage = "Boot script removed. Settings will now reset to defaults after a reboot.",
                         error = null,
                     )
                 }
@@ -1059,36 +1065,30 @@ fun Dashboard(
 
             Section(
                 title = "Settings & Persistence",
-                subtitle = "Save current settings to apply automatically on boot, or reset to kernel defaults.",
+                subtitle = "Save settings to apply automatically on boot, or reset to kernel defaults.",
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ToggleRow(
+                    title = "Apply automatically on boot",
+                    desc = if (isBootApplied)
+                        "Active: Any change to your settings is automatically rewritten to Magisk service.d"
+                    else
+                        "Disabled: Changes only last until reboot",
+                    checked = isBootApplied,
+                    help = HelpInfo(
+                        "Apply automatically on boot",
+                        "When enabled, Vector Link writes an executable startup script to /data/adb/service.d/99-vector-link.sh. While active, any settings you change in this app are dynamically rewritten to this boot script so they always survive reboots.\n\nToggling this off deletes the boot script.",
+                        "Change your charge limit or thermal ceiling at any time, and the boot script updates automatically.",
+                    ),
+                ) { enabled ->
+                    if (enabled) vm.applyOnBoot() else vm.removeBootScript()
+                }
+
+                if (isBootApplied) {
                     Text(
-                        if (isBootApplied)
-                            "Boot script is active at /data/adb/service.d/99-vector-link.sh. Settings will be applied on every boot."
-                        else
-                            "Settings are runtime-only by default and reset on reboot. Writing a script to Magisk service.d persists them automatically.",
+                        "Script location: /data/adb/service.d/99-vector-link.sh (auto-updated on every change)",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.primary,
                     )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Button(
-                            onClick = vm::applyOnBoot,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text(if (isBootApplied) "Update Boot Script" else "Apply on Boot")
-                        }
-                        if (isBootApplied) {
-                            OutlinedButton(
-                                onClick = vm::removeBootScript,
-                            ) {
-                                Text("Remove")
-                            }
-                        }
-                    }
                 }
 
                 HorizontalDivider()
