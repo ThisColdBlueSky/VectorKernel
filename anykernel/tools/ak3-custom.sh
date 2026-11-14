@@ -27,12 +27,6 @@ check_twrp() {
 check_vendor_hals() {
   grep -q "/vendor " /proc/mounts || mount /vendor;
   if [ $? -eq 0 ]; then
-    if grep -qs is_miuicamera_app /vendor/lib/hw/audio.primary.*.so; then
-      ui_print " " "Stock Audio HAL detected.";
-      fdtput $AKHOME/dtb /soc/qcom,msm-audio-apr/qcom,q6core-audio/sound qcom,aw88261-model -d;
-      fdtput $AKHOME/dtb /soc/qcom,msm-audio-apr/qcom,q6core-audio/sound qcom,fs1962-model -d;
-      dtb_patched=1;
-    fi;
     if grep -qs displayfeature /vendor/bin/hw/vendor.qti.hardware.display.composer-service; then
       ui_print " " "Stock Display HAL detected.";
       fdtput $AKHOME/dtb /soc/qcom,mdss_mdp@5e00000/qcom,mdss_dsi_k6s_38_0c_0a_fhdp_dsc_vid qcom,mdss-pan-physical-width-dimension 695;
