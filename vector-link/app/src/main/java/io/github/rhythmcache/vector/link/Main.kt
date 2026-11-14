@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -139,6 +140,10 @@ object VectorDefaults {
         VectorNodes.CLEAR to CLEAR,
         VectorNodes.SKIN to SKIN,
     )
+
+    // Written one by one during reset. RESUME is skipped (kernel only accepts 20..stop-2;
+    // setting stop=0 already clears both), and TRIP/CLEAR need ordered writes.
+    val WRITABLE = MAP - setOf(VectorNodes.RESUME, VectorNodes.TRIP, VectorNodes.CLEAR)
 }
 
 data class Snapshot(
@@ -206,22 +211,25 @@ object VectorRepo {
         Shell.cmd("echo \"$value\" > ${VectorNodes.DIR}/$node").exec().isSuccess
     }
 
+    // Park clear at its minimum (300 = 30.0 °C) so any trip value is valid, set trip,
+    // then set clear. Parking low is conservative: overrides only return after a deeper cool-down.
+    private fun tripClearLines(dir: String, trip: Int, clear: Int) = buildString {
+        append("echo 300 > \"$dir/${VectorNodes.CLEAR}\"\n")
+        append("echo $trip > \"$dir/${VectorNodes.TRIP}\"\n")
+        append("echo $clear > \"$dir/${VectorNodes.CLEAR}\"\n")
+    }
+
+    suspend fun writeTripClear(trip: Int, clear: Int): Boolean = withContext(Dispatchers.IO) {
+        Shell.cmd(tripClearLines(VectorNodes.DIR, trip, clear)).exec().isSuccess
+    }
+
     suspend fun restoreDefaults(): Boolean = withContext(Dispatchers.IO) {
         val script = buildString {
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.STOP}\n")
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.BYPASS}\n")
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.ICL}\n")
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.IGN_CHG}\n")
-            append("echo 18 > ${VectorNodes.DIR}/${VectorNodes.VENDOR_MAX}\n")
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.IGN_CPU}\n")
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.CPU_LITTLE}\n")
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.CPU_BIG}\n")
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.IGN_GPU}\n")
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.GPU_MAX}\n")
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.IGN_BL}\n")
-            append("echo 450 > ${VectorNodes.DIR}/${VectorNodes.TRIP}\n")
-            append("echo 420 > ${VectorNodes.DIR}/${VectorNodes.CLEAR}\n")
-            append("echo 0 > ${VectorNodes.DIR}/${VectorNodes.SKIN}\n")
+            VectorDefaults.WRITABLE.forEach { (node, v) ->
+                append("echo $v > ${VectorNodes.DIR}/$node\n")
+            }
+            // Last on purpose: Result.isSuccess reflects the final command's exit code.
+            append(tripClearLines(VectorNodes.DIR, VectorDefaults.TRIP, VectorDefaults.CLEAR))
         }
         Shell.cmd(script).exec().isSuccess
     }
@@ -274,8 +282,7 @@ object VectorRepo {
             append("echo $ignGpu > \"\$VDIR/${VectorNodes.IGN_GPU}\"\n")
             append("echo $gpuMax > \"\$VDIR/${VectorNodes.GPU_MAX}\"\n")
             append("echo $ignBl > \"\$VDIR/${VectorNodes.IGN_BL}\"\n")
-            append("echo $trip > \"\$VDIR/${VectorNodes.TRIP}\"\n")
-            append("echo $clear > \"\$VDIR/${VectorNodes.CLEAR}\"\n")
+            append(tripClearLines("\$VDIR", trip, clear))
             append("echo $skin > \"\$VDIR/${VectorNodes.SKIN}\"\n")
         }
 
@@ -370,7 +377,7 @@ class VectorViewModel : ViewModel() {
         _state.update { it.copy(gate = Gate.Ready, snap = snap.copy(nodes = merged), isBootApplied = bootInstalled) }
     }
 
-    private fun write(node: String, value: String, expected: Map<String, Int>) {
+    private fun writeWith(what: String, expected: Map<String, Int>, op: suspend () -> Boolean) {
         viewModelScope.launch {
             mutex.withLock {
                 val until = SystemClock.elapsedRealtime() + 3000
@@ -379,12 +386,12 @@ class VectorViewModel : ViewModel() {
                 _state.update { s ->
                     s.snap?.let { s.copy(snap = it.copy(nodes = it.nodes + expected)) } ?: s
                 }
-                val ok = VectorRepo.write(node, value)
+                val ok = op()
                 if (!ok) expected.keys.forEach { pending.remove(it) }
                 _state.update {
                     it.copy(
                         error = if (ok) null
-                        else "Couldn't write \"$value\" to $node. The kernel may have rejected the value."
+                        else "Couldn't write $what. The kernel may have rejected the value."
                     )
                 }
                 refreshLocked()
@@ -393,6 +400,19 @@ class VectorViewModel : ViewModel() {
                 }
             }
         }
+    }
+
+    private fun write(node: String, value: String, expected: Map<String, Int>) =
+        writeWith("\"$value\" to $node", expected) { VectorRepo.write(node, value) }
+
+    /** Lowers clear automatically if the new trip would violate clear <= trip - 20. */
+    fun setTrip(trip: Int) {
+        val cur = _state.value.snap?.nodes?.get(VectorNodes.CLEAR) ?: VectorDefaults.CLEAR
+        val clear = minOf(cur, trip - 20)
+        writeWith(
+            "trip $trip / clear $clear",
+            mapOf(VectorNodes.TRIP to trip, VectorNodes.CLEAR to clear),
+        ) { VectorRepo.writeTripClear(trip, clear) }
     }
 
     /** value may be "80 75" for the dual-value syntax; only the first number is tracked. */
@@ -413,11 +433,12 @@ class VectorViewModel : ViewModel() {
     fun restoreDefaults() {
         viewModelScope.launch {
             mutex.withLock {
-                VectorDefaults.MAP.forEach { (k, v) ->
+                val writableMap = VectorDefaults.MAP - VectorNodes.RESUME
+                writableMap.forEach { (k, v) ->
                     pending[k] = Pending(v, SystemClock.elapsedRealtime() + 3000)
                 }
                 _state.update { s ->
-                    s.snap?.let { s.copy(snap = it.copy(nodes = it.nodes + VectorDefaults.MAP)) } ?: s
+                    s.snap?.let { s.copy(snap = it.copy(nodes = it.nodes + writableMap)) } ?: s
                 }
                 val ok = VectorRepo.restoreDefaults()
                 if (ok) {
@@ -435,19 +456,21 @@ class VectorViewModel : ViewModel() {
 
     fun applyOnBoot() {
         viewModelScope.launch {
-            val snap = _state.value.snap ?: return@launch
-            val ok = VectorRepo.applyOnBoot(snap)
-            if (ok) {
-                _state.update {
-                    it.copy(
-                        isBootApplied = true,
-                        infoMessage = "Boot script enabled: settings will automatically apply on boot and update dynamically with any change.",
-                        error = null,
-                    )
-                }
-            } else {
-                _state.update {
-                    it.copy(error = "Failed to write boot script to Magisk service.d directory.")
+            mutex.withLock {
+                val snap = _state.value.snap ?: return@launch
+                val ok = VectorRepo.applyOnBoot(snap)
+                if (ok) {
+                    _state.update {
+                        it.copy(
+                            isBootApplied = true,
+                            infoMessage = "Boot script enabled: settings will automatically apply on boot and update dynamically with any change.",
+                            error = null,
+                        )
+                    }
+                } else {
+                    _state.update {
+                        it.copy(error = "Failed to write boot script to /data/adb/service.d.")
+                    }
                 }
             }
         }
@@ -455,18 +478,20 @@ class VectorViewModel : ViewModel() {
 
     fun removeBootScript() {
         viewModelScope.launch {
-            val ok = VectorRepo.removeBootScript()
-            if (ok) {
-                _state.update {
-                    it.copy(
-                        isBootApplied = false,
-                        infoMessage = "Boot script removed. Settings will now reset to defaults after a reboot.",
-                        error = null,
-                    )
-                }
-            } else {
-                _state.update {
-                    it.copy(error = "Failed to remove boot script.")
+            mutex.withLock {
+                val ok = VectorRepo.removeBootScript()
+                if (ok) {
+                    _state.update {
+                        it.copy(
+                            isBootApplied = false,
+                            infoMessage = "Boot script removed. Settings will now reset to defaults after a reboot.",
+                            error = null,
+                        )
+                    }
+                } else {
+                    _state.update {
+                        it.copy(error = "Failed to remove boot script.")
+                    }
                 }
             }
         }
@@ -534,6 +559,7 @@ fun openUrl(context: Context, url: String) {
         }
         context.startActivity(intent)
     } catch (_: Exception) {
+        Toast.makeText(context, "No browser or app found to open link", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -611,7 +637,7 @@ fun HelpDialog(info: HelpInfo, onDismiss: () -> Unit) {
 fun DisclaimerDialog(onClose: (dontShowAgain: Boolean) -> Unit) {
     var dontShowAgain by remember { mutableStateOf(false) }
     AlertDialog(
-        onDismissRequest = { onClose(dontShowAgain) },
+        onDismissRequest = {},
         title = { Text("⚠ Read before changing anything") },
         text = {
             Column(
@@ -1015,7 +1041,7 @@ fun Dashboard(
                         "Hard safety tripwire based on the real battery cell temperature from the fuel gauge. When it's reached, the charging, CPU, GPU and display overrides are cancelled immediately and stock throttling is restored. Default is 45.0 °C; allowed range is 40.0–47.0 °C. Lower is safer.",
                         "43.0 °C gives an extra safety margin while gaming; 45.0 °C is the default.",
                     ),
-                ) { vm.set(VectorNodes.TRIP, it) }
+                ) { vm.setTrip(it) }
                 if (has(VectorNodes.CLEAR)) {
                     val max = trip - 20
                     SliderRow(
@@ -1070,7 +1096,7 @@ fun Dashboard(
                 ToggleRow(
                     title = "Apply automatically on boot",
                     desc = if (isBootApplied)
-                        "Active: Any change to your settings is automatically rewritten to Magisk service.d"
+                        "Active: Any change to your settings is automatically rewritten to /data/adb/service.d"
                     else
                         "Disabled: Changes only last until reboot",
                     checked = isBootApplied,
@@ -1342,6 +1368,8 @@ fun BatteryGauge(percent: Int, modifier: Modifier = Modifier) {
         animationSpec = infiniteRepeatable(tween(2600, easing = LinearEasing)),
         label = "phase",
     )
+    val clipPath = remember { Path() }
+    val wavePath = remember { Path() }
     val fluid = when {
         percent <= 15 -> Color(0xFFE53935)
         percent <= 30 -> Color(0xFFFFB300)
@@ -1368,24 +1396,25 @@ fun BatteryGauge(percent: Int, modifier: Modifier = Modifier) {
             )
 
             val body = RoundRect(Rect(0f, bodyTop, size.width, size.height), corner)
-            clipPath(Path().apply { addRoundRect(body) }) {
+            clipPath.reset()
+            clipPath.addRoundRect(body)
+            clipPath(clipPath) {
                 drawRect(track)
                 val fillH = bodyH * level
                 val top = size.height - fillH
                 val amp = if (level in 0.02f..0.98f) 7.dp.toPx() else 0f
-                val wave = Path().apply {
-                    moveTo(0f, top)
-                    var x = 0f
-                    while (x <= size.width) {
-                        val y = top + sin(x / size.width * 2f * PI.toFloat() * 1.4f + phase) * amp
-                        lineTo(x, y)
-                        x += 4f
-                    }
-                    lineTo(size.width, size.height)
-                    lineTo(0f, size.height)
-                    close()
+                wavePath.reset()
+                wavePath.moveTo(0f, top)
+                var x = 0f
+                while (x <= size.width) {
+                    val y = top + sin(x / size.width * 2f * PI.toFloat() * 1.4f + phase) * amp
+                    wavePath.lineTo(x, y)
+                    x += 4f
                 }
-                drawPath(wave, fluid)
+                wavePath.lineTo(size.width, size.height)
+                wavePath.lineTo(0f, size.height)
+                wavePath.close()
+                drawPath(wavePath, fluid)
             }
             drawRoundRect(
                 color = outline,
