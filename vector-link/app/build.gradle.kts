@@ -40,8 +40,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             // CI has no release keystore; fall back to the debug key so the
             // release variant still builds. Distribution builds must supply one.
             val releaseSigning = signingConfigs.getByName("release")
