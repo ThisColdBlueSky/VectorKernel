@@ -22,6 +22,8 @@ on:
       - main
     paths-ignore:
       - '**.md'
+      - '**.rst'
+      - 'Documentation/**'
       - '.gitignore'
       - 'LICENSE'
 
