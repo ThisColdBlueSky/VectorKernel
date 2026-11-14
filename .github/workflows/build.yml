@@ -362,10 +362,10 @@ jobs:
           BUILD_DATE=$(date -u +%Y%m%d)
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
 
-          # Copy individual zips, checksums and APKs
+          # Copy individual zips, checksums and only release APK
           find all_artifacts -name "*.zip" -exec cp {} release_assets/ \;
           find all_artifacts -name "*.sha256" -exec cp {} release_assets/ \;
-          find all_artifacts -name "*.apk" -exec cp {} release_assets/ \;
+          find all_artifacts -name "*release*.apk" -exec cp {} release_assets/ \;
 
           for apk in release_assets/*.apk; do
             if [ -f "$apk" ]; then
