@@ -437,6 +437,13 @@ static int __recover_dot_dentries(struct inode *dir, nid_t pino)
 		return 0;
 	}
 
+	if (!S_ISDIR(dir->i_mode)) {
+		f2fs_err(sbi, "inconsistent inode status, ino:%lu, is_dir:%d",
+			  dir->i_ino, S_ISDIR(dir->i_mode));
+		set_sbi_flag(sbi, SBI_NEED_FSCK);
+		return -EFSCORRUPTED;
+	}
+
 	err = dquot_initialize(dir);
 	if (err)
 		return err;
