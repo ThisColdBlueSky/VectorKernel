@@ -3321,6 +3321,9 @@ int f2fs_inplace_write_data(struct f2fs_io_info *fio)
 	if (fio->post_read)
 		f2fs_truncate_meta_inode_pages(sbi, fio->new_blkaddr, 1);
 
+	invalidate_mapping_pages(META_MAPPING(sbi),
+				fio->new_blkaddr, fio->new_blkaddr);
+
 	stat_inc_inplace_blocks(fio->sbi);
 
 	if (fio->bio && !(SM_I(sbi)->ipu_policy & (1 << F2FS_IPU_NOCACHE)))
