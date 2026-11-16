@@ -43,9 +43,7 @@
 #include "conditional.h"
 
 #ifdef CONFIG_KSU_SUSFS
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #include <linux/ksu_hook.h>
-#endif
 extern int susfs_security_context_str_to_sid(struct selinux_state *state,
 				const char *scontext, u32 *sid, gfp_t gfp);
 extern void susfs_security_compute_av_user(struct selinux_state *state,
