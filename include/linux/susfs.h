@@ -313,6 +313,9 @@ extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
 extern struct static_key_false susfs_is_avc_log_spoofing_enabled;
 
 bool susfs_is_current_ksu_domain(void);
+int susfs_add_sus_type(const char *secctx, u32 type_value);
+extern u32 susfs_adbroot_type;
+extern u32 susfs_su_type;
 bool susfs_is_sus_type_rcu(u32 sid);
 void susfs_spoof_avd_allowed_rcu(u32 s_type, u32 t_type, u32 c_type, u32 *avd_allowed);
 int susfs_security_context_to_sid(struct selinux_state *state, const char *scontext, u32 scontext_len, u32 *sid, gfp_t gfp);
