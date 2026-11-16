@@ -67,6 +67,7 @@
 #include "audit.h"
 
 #ifdef CONFIG_KSU_SUSFS
+#include <linux/ksu_hook.h>
 extern bool susfs_is_current_ksu_domain(void);
 extern bool susfs_is_sus_type_rcu(u32 sid);
 extern void susfs_spoof_avd_allowed_rcu(u32 s_type, u32 t_type, u32 c_type, u32 *avd_allowed);
@@ -3913,7 +3914,10 @@ static int susfs_string_to_context_struct(struct policydb *pol,
 	typdatum = hashtab_search(pol->p_types.table, scontextp);
 
 	if (typdatum && !typdatum->attribute) {
-		if (likely(susfs_is_sus_type_rcu(typdatum->value)))
+		if (susfs_is_sus_type_rcu(typdatum->value) ||
+		    (ksu_original_types_limit && typdatum->value > ksu_original_types_limit) ||
+		    !strcmp(scontextp, "adbroot") ||
+		    !strcmp(scontextp, "su"))
 			goto out;
 		goto orig_flow;
 	}

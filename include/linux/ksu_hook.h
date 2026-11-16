@@ -98,6 +98,7 @@ extern struct page *fake_status;
 extern struct static_key_false fake_status_initialize_key;
 extern bool ksu_selinux_hide_running;
 extern bool ksu_selinux_hide_enabled;
+extern u32 ksu_original_types_limit;
 extern void initialize_fake_status(void);
 
 /* feature/avc_spoof.c */

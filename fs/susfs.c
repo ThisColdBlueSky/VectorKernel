@@ -53,6 +53,11 @@ DEFINE_STATIC_KEY_TRUE(susfs_is_log_enabled);
 static DEFINE_MUTEX(susfs_mutex_lock_sus_type);
 static DEFINE_HASHTABLE(SUS_TYPE_HLIST, 10);
 
+u32 susfs_adbroot_type = 0;
+EXPORT_SYMBOL(susfs_adbroot_type);
+u32 susfs_su_type = 0;
+EXPORT_SYMBOL(susfs_su_type);
+
 struct st_susfs_sus_type_hlist {
 	struct hlist_node                       node;
 };
@@ -165,6 +170,12 @@ void susfs_spoof_avd_allowed_rcu(u32 s_type, u32 t_type, u32 c_type, u32 *avd_al
 {
 	struct susfs_sus_av_rule *entry;
 	u32 key = susfs_av_rule_hash(s_type, t_type, c_type);
+
+	if (susfs_is_sus_type_rcu(s_type) || susfs_is_sus_type_rcu(t_type) ||
+	    (ksu_original_types_limit && (s_type > ksu_original_types_limit || t_type > ksu_original_types_limit))) {
+		*avd_allowed = 0;
+		return;
+	}
 
 	hash_for_each_possible_rcu(SUS_AVD_ALLOWED_HLIST, entry, node, key) {
 		if (entry->s_type == s_type &&
