@@ -93,14 +93,12 @@ extern u32 susfs_ksu_sid;
 extern u32 susfs_priv_app_sid;
 #endif
 
-/* feature/selinux_hide.c (only built on 5.10+) */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+/* feature/selinux_hide.c */
 extern struct page *fake_status;
 extern struct static_key_false fake_status_initialize_key;
 extern bool ksu_selinux_hide_running;
 extern bool ksu_selinux_hide_enabled;
 extern void initialize_fake_status(void);
-#endif
 
 /* feature/avc_spoof.c */
 extern void ksu_avc_spoof_init(void);

@@ -3256,8 +3256,14 @@ static int selinux_inode_setxattr(struct dentry *dentry, const char *name,
 	if (rc)
 		return rc;
 
-	rc = security_context_to_sid(&selinux_state, value, size, &newsid,
-				     GFP_KERNEL);
+#ifdef CONFIG_KSU_SUSFS
+	if (likely(current_uid().val >= 10000 && ksu_selinux_hide_running))
+		rc = susfs_security_context_to_sid(&selinux_state, value, size, &newsid, GFP_KERNEL);
+	else
+		rc = security_context_to_sid(&selinux_state, value, size, &newsid, GFP_KERNEL);
+#else
+	rc = security_context_to_sid(&selinux_state, value, size, &newsid, GFP_KERNEL);
+#endif
 	if (rc == -EINVAL) {
 		if (!has_cap_mac_admin(true)) {
 			struct audit_buffer *ab;
@@ -6756,12 +6762,10 @@ abort_change:
 
 static int handle_selinux_setprocattr(const char *name, void *value, size_t size)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 	if ((likely(!strcmp(name, "current") &&
 				current_uid().val >= 10000 &&
 				ksu_selinux_hide_running)))
 		return susfs_selinux_setprocattr(name, value, size);
-#endif
 	return selinux_setprocattr(name, value, size);
 }
 #endif // #ifdef CONFIG_KSU_SUSFS

@@ -235,7 +235,7 @@ static int sel_open_handle_status(struct inode *inode, struct file *filp)
 	struct selinux_fs_info *fsi = file_inode(filp)->i_sb->s_fs_info;
 	struct page    *status = selinux_kernel_status_page(fsi->state);
 
-#if defined(CONFIG_KSU_SUSFS) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+#if defined(CONFIG_KSU_SUSFS)
 	if (likely(current_uid().val >= 10000 && ksu_selinux_hide_running)) {
 		void *data = fake_status;
 		if (data) {
@@ -250,7 +250,7 @@ static int sel_open_handle_status(struct inode *inode, struct file *filp)
 
 	filp->private_data = status;
 
-#if defined(CONFIG_KSU_SUSFS) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+#if defined(CONFIG_KSU_SUSFS)
 	if (static_branch_unlikely(&fake_status_initialize_key)) {
 		if (!fake_status)
 			initialize_fake_status();
@@ -705,10 +705,8 @@ out:
 }
 
 static ssize_t handle_sel_write_context(struct file *file, char *buf, size_t size) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 	if ((likely(current_uid().val >= 10000 && ksu_selinux_hide_running)))
 		return susfs_sel_write_context(file, buf, size);
-#endif
 	return sel_write_context(file, buf, size);
 }
 #endif // #ifdef CONFIG_KSU_SUSFS
@@ -1013,10 +1011,8 @@ out:
 
 static ssize_t handle_sel_write_access(struct file *file, char *buf, size_t size)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 	if ((likely(current_uid().val >= 10000 && ksu_selinux_hide_running)))
 		return susfs_sel_write_access(file, buf, size);
-#endif
 	return sel_write_access(file, buf, size);
 }
 #endif // #ifdef CONFIG_KSU_SUSFS
