@@ -22,6 +22,7 @@
 #include "../kernelsu/policy/app_profile.h"
 #include "../kernelsu/policy/allowlist.h"
 #include "../kernelsu/feature/selinux_hide.h"
+#include "../kernelsu/feature/avc_spoof.h"
 #include "../kernelsu/preinit/preinit.h"
 #include "../kernelsu/supercall/supercall.h"
 #include "../kernelsu/hook/lsm_hook.h"
