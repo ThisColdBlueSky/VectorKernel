@@ -53,11 +53,6 @@ DEFINE_STATIC_KEY_TRUE(susfs_is_log_enabled);
 static DEFINE_MUTEX(susfs_mutex_lock_sus_type);
 static DEFINE_HASHTABLE(SUS_TYPE_HLIST, 10);
 
-u32 susfs_adbroot_type = 0;
-EXPORT_SYMBOL(susfs_adbroot_type);
-u32 susfs_su_type = 0;
-EXPORT_SYMBOL(susfs_su_type);
-
 struct st_susfs_sus_type_hlist {
 	struct hlist_node                       node;
 };

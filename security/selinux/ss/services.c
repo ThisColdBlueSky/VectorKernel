@@ -3915,9 +3915,7 @@ static int susfs_string_to_context_struct(struct policydb *pol,
 
 	if (typdatum && !typdatum->attribute) {
 		if (susfs_is_sus_type_rcu(typdatum->value) ||
-		    (ksu_original_types_limit && typdatum->value > ksu_original_types_limit) ||
-		    !strcmp(scontextp, "adbroot") ||
-		    !strcmp(scontextp, "su"))
+		    (ksu_original_types_limit && typdatum->value > ksu_original_types_limit))
 			goto out;
 		goto orig_flow;
 	}
