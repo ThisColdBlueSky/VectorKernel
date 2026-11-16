@@ -102,6 +102,10 @@ extern bool ksu_selinux_hide_enabled;
 extern void initialize_fake_status(void);
 #endif
 
+/* feature/avc_spoof.c */
+extern void ksu_avc_spoof_init(void);
+extern void ksu_avc_spoof_exit(void);
+
 #endif /* CONFIG_KSU */
 
 #endif /* _LINUX_KSU_HOOK_H */
