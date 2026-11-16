@@ -34,6 +34,11 @@ static __always_inline void __update_lru_size(struct lruvec *lruvec,
 	__mod_lruvec_state(lruvec, NR_LRU_BASE + lru, nr_pages);
 	__mod_zone_page_state(&pgdat->node_zones[zid],
 				NR_ZONE_LRU_BASE + lru, nr_pages);
+#ifdef CONFIG_DEBUG_VM
+	WARN_ONCE(atomic_long_read(&pgdat->vm_stat[NR_ACTIVE_FILE]) < 0,
+		  "NR_ACTIVE_FILE negative: %ld\n",
+		  atomic_long_read(&pgdat->vm_stat[NR_ACTIVE_FILE]));
+#endif
 }
 
 static __always_inline void update_lru_size(struct lruvec *lruvec,
@@ -128,6 +133,12 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct page *page,
 			lru += LRU_ACTIVE;
 		update_lru_size(lruvec, lru, zone, -delta);
 		return;
+	}
+
+	/* promotion */
+	if (!lru_gen_is_active(lruvec, old_gen) && lru_gen_is_active(lruvec, new_gen)) {
+		update_lru_size(lruvec, lru, zone, -delta);
+		update_lru_size(lruvec, lru + LRU_ACTIVE, zone, delta);
 	}
 }
 
