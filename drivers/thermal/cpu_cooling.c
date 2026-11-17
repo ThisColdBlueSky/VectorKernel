@@ -374,6 +374,10 @@ static void cpufreq_cooling_thermal_override_reapply(void)
 		if (vendor_thermal_cpu_override_active(&max_allowed_state, cpufreq_cdev->policy)) {
 			if (state > max_allowed_state)
 				state = min(max_allowed_state, (unsigned long)cpufreq_cdev->max_level);
+
+			if (cpufreq_cdev->policy && cpufreq_cdev->policy->max_freq_req)
+				freq_qos_update_request(cpufreq_cdev->policy->max_freq_req,
+							cpufreq_cdev->policy->cpuinfo.max_freq);
 		}
 		if (cpufreq_cdev->cpufreq_state != state) {
 			int ret = freq_qos_update_request(&cpufreq_cdev->qos_req,

@@ -29,6 +29,8 @@
 #include <linux/suspend.h>
 #include <linux/syscore_ops.h>
 #include <linux/tick.h>
+#include <linux/sched.h>
+#include <linux/thermal_override.h>
 #include <trace/events/power.h>
 
 static LIST_HEAD(cpufreq_policy_list);
@@ -731,7 +733,12 @@ static ssize_t store_##file_name					\
 	if (ret != 1)							\
 		return -EINVAL;						\
 									\
-	return count;							\
+	if (IS_ENABLED(CONFIG_WT_CHG) && !strcmp(#object, "max") &&	\
+	    strstr(current->comm, "thermal") &&				\
+	    vendor_thermal_cpu_override_active(NULL, policy)) {		\
+		if (val < policy->cpuinfo.max_freq)			\
+			return count;					\
+	}								\
 									\
 	ret = freq_qos_update_request(policy->object##_freq_req, val);\
 	return ret >= 0 ? count : ret;					\
