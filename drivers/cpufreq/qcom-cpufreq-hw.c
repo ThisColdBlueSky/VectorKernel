@@ -327,8 +327,11 @@ static int qcom_cpufreq_hw_read_lut(struct platform_device *pdev,
 		prev_cc = core_count;
 		prev_freq = freq;
 
-		if (cpu_dev && !invalidate_freq)
+		if (cpu_dev && !invalidate_freq) {
+			pr_info("qcom-cpufreq-hw: [Domain %d] step %02u: freq = %7u kHz, volt = %u mV (%u uV)\n",
+				domain_index, i, freq, volt / 1000, volt);
 			dev_pm_opp_add(cpu_dev, freq * 1000, volt);
+		}
 	}
 
 	c->table[i].frequency = CPUFREQ_TABLE_END;
