@@ -63,6 +63,7 @@
 #include <net/tcp.h>
 #include <linux/inet_diag.h>
 #include <linux/inet.h>
+#include <linux/user_namespace.h>
 #include <linux/random.h>
 #include <linux/win_minmax.h>
 
@@ -94,6 +95,11 @@ static inline bool tcp_plb_enabled(const struct net *net)
 #endif
 
 #define bbr_param(sk,name)	(bbr_ ## name)
+
+/* Debug switch: toggleable via /sys/module/tcp_bbr/parameters/debug */
+static int bbr_debug = 1;
+module_param_named(debug, bbr_debug, int, 0644);
+MODULE_PARM_DESC(debug, "Enable BBR pacing rate drop debug logging");
 
 /* Scale factor for rate in pkt/uSec unit to avoid truncation in bandwidth
  * estimation. The rate unit ~= (1500 bytes / 1 usec / 2^24) ~= 715 bps.
@@ -379,6 +385,7 @@ static void bbr_reset_congestion_signals(struct sock *sk);
 static void bbr_run_loss_probe_recovery(struct sock *sk);
 
 static void bbr_check_probe_rtt_done(struct sock *sk);
+static enum tcp_bbr_phase bbr_get_phase(struct bbr *bbr);
 
 /* This connection can use ECN if both endpoints have signaled ECN support in
  * the handshake and the per-route settings indicated this is a
@@ -487,12 +494,40 @@ static void bbr_set_pacing_rate(struct sock *sk, u32 bw, int gain)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bbr *bbr = inet_csk_ca(sk);
+	unsigned long old_rate = READ_ONCE(sk->sk_pacing_rate);
 	unsigned long rate = bbr_bw_to_pacing_rate(sk, bw, gain);
 
 	if (unlikely(!bbr->has_seen_rtt && tp->srtt_us))
 		bbr_init_pacing_rate_from_rtt(sk);
-	if (bbr_full_bw_reached(sk) || rate > READ_ONCE(sk->sk_pacing_rate))
+	if (bbr_full_bw_reached(sk) || rate > READ_ONCE(sk->sk_pacing_rate)) {
+		if (bbr_debug && old_rate != ~0UL && old_rate > rate &&
+		    (rate < 62500 || (old_rate - rate) > (old_rate / 2))) {
+			static DEFINE_RATELIMIT_STATE(bbr_drop_rs, 5 * HZ, 100);
+
+			if (__ratelimit(&bbr_drop_rs)) {
+				u64 bw_Bps = bbr_bw_bytes_per_sec(sk, bw);
+				u64 bw_hi_Bps = bbr_bw_bytes_per_sec(sk, bbr_max_bw(sk));
+				u64 bw_lo_Bps = bbr->bw_lo == ~0U ? ~0ULL : bbr_bw_bytes_per_sec(sk, bbr->bw_lo);
+
+				pr_warn("BBR_DROP: uid=%u port=%u->%u old_rate=%lu rate=%lu (bps=%lu) full_bw=%u bw=%llu bw_lo=%llu bw_hi=%llu gain=%d mode=%u phase=%u lost=%u retrans=%u srtt_us=%u send_q=%u app_ltd=%u\n",
+					from_kuid_munged(&init_user_ns, sk->sk_uid),
+					ntohs(inet_sk(sk)->inet_sport),
+					ntohs(inet_sk(sk)->inet_dport),
+					old_rate, rate, rate * 8,
+					bbr_full_bw_reached(sk),
+					bw_Bps, bw_lo_Bps, bw_hi_Bps,
+					gain,
+					bbr->mode,
+					bbr_get_phase(bbr),
+					tp->lost_out,
+					tp->retrans_out,
+					tp->srtt_us >> 3,
+					max_t(int, tp->write_seq - tp->snd_una, 0),
+					tp->app_limited ? 1 : 0);
+			}
+		}
 		WRITE_ONCE(sk->sk_pacing_rate, rate);
+	}
 }
 
 /* Return the number of segments BBR would like in a TSO/GSO skb, given a
