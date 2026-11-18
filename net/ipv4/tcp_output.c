@@ -43,6 +43,7 @@
 #include <linux/gfp.h>
 #include <linux/module.h>
 #include <linux/static_key.h>
+#include <linux/user_namespace.h>
 
 #include <trace/events/tcp.h>
 
@@ -2442,6 +2443,16 @@ static bool tcp_pacing_check(struct sock *sk)
 
 	if (tp->tcp_wstamp_ns <= tp->tcp_clock_cache)
 		return false;
+
+	if (tp->tcp_wstamp_ns - tp->tcp_clock_cache > 20 * NSEC_PER_MSEC) {
+		pr_warn_ratelimited("TCP_PACING_STALL: uid=%u port=%u->%u pacing_rate=%lu send_q=%u delay_ms=%llu\n",
+				    from_kuid_munged(&init_user_ns, sk->sk_uid),
+				    ntohs(inet_sk(sk)->inet_sport),
+				    ntohs(inet_sk(sk)->inet_dport),
+				    READ_ONCE(sk->sk_pacing_rate),
+				    max_t(int, tp->write_seq - tp->snd_una, 0),
+				    div_u64(tp->tcp_wstamp_ns - tp->tcp_clock_cache, NSEC_PER_MSEC));
+	}
 
 	if (!hrtimer_is_queued(&tp->pacing_timer)) {
 		hrtimer_start(&tp->pacing_timer,
