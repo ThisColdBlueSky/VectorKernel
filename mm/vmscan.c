@@ -4049,7 +4049,8 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 	struct lru_gen_mm_walk *walk;
 	int young = 0;
 	unsigned long bitmap[BITS_TO_LONGS(MIN_LRU_BATCH)] = {};
-	struct mem_cgroup *memcg = page_memcg(pvmw->page);
+	struct mem_cgroup *raw_memcg = page_memcg(pvmw->page);
+	struct mem_cgroup *memcg = raw_memcg ?: root_mem_cgroup;
 	struct pglist_data *pgdat = page_pgdat(pvmw->page);
 	struct lruvec *lruvec = mem_cgroup_lruvec(pgdat, memcg);
 	DEFINE_MAX_SEQ(lruvec);
@@ -4057,6 +4058,13 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 
 	lockdep_assert_held(pvmw->ptl);
 	VM_BUG_ON_PAGE(PageLRU(pvmw->page), pvmw->page);
+
+	if (unlikely(!raw_memcg)) {
+		pr_warn_ratelimited("MGLRU look_around: NULL memcg! page=%px flags=0x%lx anon=%d swapcache=%d count=%d mapcount=%d\n",
+				    pvmw->page, pvmw->page->flags,
+				    PageAnon(pvmw->page), PageSwapCache(pvmw->page),
+				    page_count(pvmw->page), page_mapcount(pvmw->page));
+	}
 
 	if (spin_is_contended(pvmw->ptl))
 		return;
