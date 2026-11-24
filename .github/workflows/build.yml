@@ -15,21 +15,15 @@ on:
       create_release:
         description: 'Publish GitHub Release'
         required: false
-        default: true
+        default: false
         type: boolean
   push:
     branches:
       - main
-      - remove-ksu
-      - bakasu-manual-hook
-      - silver-floor
-      - f2fs-backport
-      - arm64-string-backport
-      - bbrv3-backport
-      - sukisu-migration
-      - kpm-experiment
     paths-ignore:
       - '**.md'
+      - '**.rst'
+      - 'Documentation/**'
       - '.gitignore'
       - 'LICENSE'
 
@@ -65,32 +59,12 @@ jobs:
             echo "Skipping $CURRENT_VARIANT (target: variant=$TARGET_VARIANT)"
           fi
 
-      - name: Free Disk Space & Setup 16GB Swap
-        if: steps.check_variant.outputs.should_run == 'true'
-        run: |
-          echo "Freeing disk space..."
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
-          
-          echo "Setting up 16GB swap file to prevent OOM during LTO link..."
-          sudo swapoff -a || true
-          sudo rm -f /swapfile
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
-
       - name: Checkout Source Code
         if: steps.check_variant.outputs.should_run == 'true'
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
-
-      - name: Apply SukiSU Patches
-        if: steps.check_variant.outputs.should_run == 'true'
-        run: |
-          bash ./scripts/patch_sukisu.sh
+          fetch-depth: 1
 
       - name: Set up Environment Variables
         if: steps.check_variant.outputs.should_run == 'true'
@@ -104,6 +78,7 @@ jobs:
 
           echo "DEFCONFIG=veux_defconfig" >> $GITHUB_ENV
           echo "ZIP_PREFIX=Vector-veux" >> $GITHUB_ENV
+
       - name: Install Build Dependencies
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
@@ -113,13 +88,38 @@ jobs:
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             git libssl-dev libelf-dev lz4 xz-utils zip python3
 
-      - name: Download & Set up Clang (LLVM 22.1.7)
+      - name: Download & Set up latest LLVM
         if: steps.check_variant.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           mkdir -p llvm
-          echo "Downloading ClangBuiltLinux LLVM ..."
-          curl -sSL --retry 3 "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/LLVM-23.1.4-Linux-X64.tar.xz" | tar -xJ --strip-components=1 -C llvm
+
+          for attempt in 1 2 3 4 5; do
+            echo "Download attempt $attempt"
+            rm -f llvm.tar.xz
+            if gh release download \
+                 --repo llvm/llvm-project \
+                 --pattern 'LLVM-*-Linux-X64.tar.xz' \
+                 --output llvm.tar.xz \
+               && xz -t llvm.tar.xz; then
+              echo "Download verified"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::LLVM download failed after 5 attempts"
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+
+          tar -xJf llvm.tar.xz --strip-components=1 -C llvm
+          rm llvm.tar.xz
           echo "$GITHUB_WORKSPACE/llvm/bin" >> $GITHUB_PATH
+
+          llvm/bin/clang --version
+          llvm/bin/ld.lld --version
 
       - name: Setup ccache
         if: steps.check_variant.outputs.should_run == 'true'
@@ -136,16 +136,16 @@ jobs:
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
 
-          echo "Generating defconfig..."
+          echo "Generating defconfig: ${DEFCONFIG}"
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            veux_defconfig
+            ${DEFCONFIG}
 
           echo "Enabling ThinLTO to optimize memory footprint during linking..."
           bash ./scripts/config --file out/.config -e THINLTO
 
           if [ "${{ matrix.variant }}" = "ksu" ]; then
-            echo "Enabling KernelSU & KPM (CONFIG_KSU=y, CONFIG_KPM=y)..." 
+            echo "Enabling KernelSU & KPM (CONFIG_KSU=y, CONFIG_KPM=y)..."
             bash ./scripts/config --file out/.config -e KSU -e KPM -e DEBUG_KERNEL -e KALLSYMS -e KALLSYMS_ALL
           else
             echo "Disabling KernelSU & KPM (CONFIG_KSU not set)..."
@@ -155,9 +155,6 @@ jobs:
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             olddefconfig
-
-          echo "=== Resolved memory and debug configs in out/.config ==="
-          grep -E "CONFIG_MEMCG|CONFIG_DEBUG_KERNEL|CONFIG_DEBUG_LIST|CONFIG_DEBUG_ATOMIC_SLEEP" out/.config || true
 
       - name: Compile Kernel & DTB
         if: steps.check_variant.outputs.should_run == 'true'
@@ -209,9 +206,10 @@ jobs:
         if: steps.check_variant.outputs.should_run == 'true'
         run: |
           VARIANT="${{ matrix.variant }}"
+
           if [ "$VARIANT" = "ksu" ]; then
             ZIP_NAME="${ZIP_PREFIX}-${BUILD_DATE}-KSU.zip"
-            IMAGE_SUFFIX="_KSU" 
+            IMAGE_SUFFIX="_KSU"
           else
             ZIP_NAME="${ZIP_PREFIX}-${BUILD_DATE}.zip"
             IMAGE_SUFFIX=""
@@ -223,9 +221,22 @@ jobs:
           cp out/arch/arm64/boot/Image "$PACKAGE_DIR"/Image
           cp "$DTB_PATH" "$PACKAGE_DIR"/dtb
 
+          # Dynamically set version with commit string in module.prop
+          SHORT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "${GITHUB_SHA:0:7}")
+          if [ "$VARIANT" = "ksu" ]; then
+            MOD_VER="5.4.302~Vector-${SHORT_SHA}-KSU"
+          else
+            MOD_VER="5.4.302~Vector-${SHORT_SHA}"
+          fi
+          if [ -f "$PACKAGE_DIR/module.prop" ]; then
+            sed -i "s/^version=.*/version=${MOD_VER}/" "$PACKAGE_DIR/module.prop"
+          fi
+
           chmod +x "$PACKAGE_DIR"/anykernel.sh \
                    "$PACKAGE_DIR"/META-INF/com/google/android/update-binary \
-                   "$PACKAGE_DIR"/tools/* 2>/dev/null || true
+                   "$PACKAGE_DIR"/tools/* \
+                   "$PACKAGE_DIR"/customize.sh \
+                   "$PACKAGE_DIR"/action.sh 2>/dev/null || true
 
           cd "$PACKAGE_DIR"
           zip -r9 "../${ZIP_NAME}" * -x ".git*" "README.md"
@@ -260,16 +271,76 @@ jobs:
           name: vmlinux${{ matrix.variant == 'ksu' && '-KSU' || '' }}
           path: vmlinux_output/*
           retention-days: 7
+
+  build-vector-link:
+    name: Build Vector Link (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [debug, release]
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Accept Android Licenses & Setup NDK
+        run: |
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+
+      - name: Grant execute permission
+        run: chmod +x gradlew
+        working-directory: vector-link
+
+      - name: Decode release keystore
+        if: matrix.variant == 'release'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          fi
+
+      - name: Build ${{ matrix.variant }} APK
+        env:
+          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
+        working-directory: vector-link
+        run: |
+          VARIANT="${{ matrix.variant }}"
+          TASK="assemble${VARIANT^}"
+          ./gradlew "$TASK" --no-daemon --stacktrace
+          mkdir -p apk_output
+          cp app/build/outputs/apk/${VARIANT}/*.apk "apk_output/vector-link-${VARIANT}.apk"
+
+      - name: Upload ${{ matrix.variant }} APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-link-${{ matrix.variant }}
+          path: vector-link/apk_output/*.apk
+          retention-days: 7
+
   release:
     name: Package & Release
-    needs: build
+    needs: [build, build-vector-link]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     if: |
-      always() &&
       needs.build.result == 'success' &&
-      (github.event_name == 'push' || inputs.create_release == true || inputs.create_release == 'true')
+      needs.build-vector-link.result == 'success' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.create_release == true
 
     steps:
       - name: Checkout Source Code
@@ -291,10 +362,16 @@ jobs:
           BUILD_DATE=$(date -u +%Y%m%d)
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
 
-          # Copy individual zips and checksums
+          # Copy individual zips, checksums and only release APK
           find all_artifacts -name "*.zip" -exec cp {} release_assets/ \;
           find all_artifacts -name "*.sha256" -exec cp {} release_assets/ \;
+          find all_artifacts -name "*release*.apk" -exec cp {} release_assets/ \;
 
+          for apk in release_assets/*.apk; do
+            if [ -f "$apk" ]; then
+              sha256sum "$apk" > "${apk}.sha256"
+            fi
+          done
 
           echo "Final release assets:"
           ls -la release_assets/
@@ -317,6 +394,27 @@ jobs:
             - **Branch:** `${{ github.ref_name }}`
             - **Kernel Release:** `5.4.302~Vector`
             
+            ### Highlights & Changelog:
+            - **[Maple Tree](https://docs.kernel.org/core-api/maple_tree.html) backport**: Modern memory management structure backported from Linux 6.1 for faster app switching and smoother multitasking.
+            - **[TCP BBRv3](https://github.com/google/bbr)**: Latest congestion control algorithm set as default for lower network latency and faster download speeds.
+            - **Integrated [SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)**: Next-gen KernelSU implementation with built-in [SUSFS v2.4.0](https://gitlab.com/simonpunk/susfs4ksu) stealth hooks and [KernelPatch (KPM)](https://github.com/bmax121/KernelPatch) support.
+            - **Battery charge limiter**: Pause charging at a custom percentage (e.g. 80%) with automatic resume threshold to preserve battery lifespan.
+            - **Bypass charging**: Power device hardware directly from USB power while gaming to prevent battery heating.
+            - **USB current override**: Boost slow 500 mA USB charging ports up to 1500 mA.
+            - **Independent thermal controls**: Safely bypass aggressive vendor throttling for charging, CPU, GPU, and display brightness independently, protected by battery and chassis temperature safety trips ([read documentation](https://github.com/ThisColdBlueSky/VectorKernel/blob/main/Documentation/vector.md)).
+            - **ARM64 NEON [LZ4](https://github.com/lz4/lz4)**: Accelerated decompression on Cortex-A55 cores for faster zram swapping and app launch times.
+            - **Optimized network checksums**: Hardware-accelerated IP/IPv6 routines for faster packet processing.
+            - **Fixed microphone & audio**: Resolved soundcard naming conflict in audio DTS for crystal clear audio HAL recording.
+            - **[Vector Link](https://github.com/ThisColdBlueSky/VectorKernel/tree/main/vector-link) companion app**: Clean Material 3 app with real-time battery wattage gauge, safety dialogs, and automatic boot persistence via `/data/adb/service.d`.
+            - **Universal Dual-Installer**: Flashable seamlessly in custom recovery OR directly as a Magisk / KernelSU module with automated boot backups and slot management.
+
+            ### Flashing Instructions:
+            - **Universal Dual-Installer**: Can be flashed in **both Recovery** and **KernelSU / Magisk**.
+            - When flashed as a KernelSU / Magisk module:
+              - Automatically backs up your current kernel (`boot`, `vendor_boot`, `dtbo`) to `/sdcard/Vector_Backups/` and `/data/adb/vector_kernel_backup/`.
+              - Registers an **Action** button in the module manager to easily reflash slots or restore your previous kernel at any time.
+            
             ### Included Packages:
-            - **`Vector-veux-YYYYMMDD.zip`**: Clean kernel.
-            - **`Vector-veux-YYYYMMDD-KSU.zip`**: KernelSU root support pre-compiled into `Image`.
+            - **`Vector-veux-YYYYMMDD.zip`**: Clean kernel without root.
+            - **`Vector-veux-YYYYMMDD-KSU.zip`**: KernelSU (SukiSU-Ultra) root support pre-compiled into `Image`.
+            - **`vector-link-release.apk`**: Vector Link companion app.
