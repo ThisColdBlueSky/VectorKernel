@@ -2549,6 +2549,11 @@ static void proactive_compact_node(pg_data_t *pgdat)
 
 		compact_zone(&cc, NULL);
 
+		count_compact_events(KCOMPACTD_MIGRATE_SCANNED,
+				     cc.total_migrate_scanned);
+		count_compact_events(KCOMPACTD_FREE_SCANNED,
+				     cc.total_free_scanned);
+
 		VM_BUG_ON(!list_empty(&cc.freepages));
 		VM_BUG_ON(!list_empty(&cc.migratepages));
 	}
