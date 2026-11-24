@@ -4815,6 +4815,8 @@ static void lru_gen_change_state(bool enabled)
 
 	struct mem_cgroup *memcg;
 
+	lru_add_drain_all();
+
 	cgroup_lock();
 	cpus_read_lock();
 	get_online_mems();
@@ -4862,6 +4864,8 @@ unlock:
 	put_online_mems();
 	cpus_read_unlock();
 	cgroup_unlock();
+
+	lru_add_drain_all();
 }
 
 /******************************************************************************
