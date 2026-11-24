@@ -187,8 +187,7 @@ static void set_task_reclaim_state(struct task_struct *task,
 }
 
 static LIST_HEAD(shrinker_list);
-static DEFINE_SPINLOCK(shrinker_lock);
-static DEFINE_RWLOCK(shrinker_rwlock);
+static DECLARE_RWSEM(shrinker_rwsem);
 
 #ifdef CONFIG_MEMCG
 /*
@@ -206,37 +205,29 @@ static DEFINE_RWLOCK(shrinker_rwlock);
 
 static DEFINE_IDR(shrinker_idr);
 static int shrinker_nr_max;
-static DEFINE_MUTEX(shrinker_alloc_mutex);
 
 static int prealloc_memcg_shrinker(struct shrinker *shrinker)
 {
 	int id, ret = -ENOMEM;
 
-	mutex_lock(&shrinker_alloc_mutex);
-	idr_preload(GFP_KERNEL);
-	spin_lock(&shrinker_lock);
-	id = idr_alloc(&shrinker_idr, SHRINKER_REGISTERING, 0, 0, GFP_NOWAIT);
-	spin_unlock(&shrinker_lock);
-	idr_preload_end();
+	down_write(&shrinker_rwsem);
+	/* This may call shrinker, so it must use down_read_trylock() */
+	id = idr_alloc(&shrinker_idr, SHRINKER_REGISTERING, 0, 0, GFP_KERNEL);
 	if (id < 0)
 		goto unlock;
 
 	if (id >= shrinker_nr_max) {
 		if (memcg_expand_shrinker_maps(id)) {
-			spin_lock(&shrinker_lock);
-			write_lock(&shrinker_rwlock);
 			idr_remove(&shrinker_idr, id);
-			write_unlock(&shrinker_rwlock);
-			spin_unlock(&shrinker_lock);
 			goto unlock;
 		}
 
-		WRITE_ONCE(shrinker_nr_max, id + 1);
+		shrinker_nr_max = id + 1;
 	}
 	shrinker->id = id;
 	ret = 0;
 unlock:
-	mutex_unlock(&shrinker_alloc_mutex);
+	up_write(&shrinker_rwsem);
 	return ret;
 }
 
@@ -246,11 +237,9 @@ static void unregister_memcg_shrinker(struct shrinker *shrinker)
 
 	BUG_ON(id < 0);
 
-	spin_lock(&shrinker_lock);
-	write_lock(&shrinker_rwlock);
+	down_write(&shrinker_rwsem);
 	idr_remove(&shrinker_idr, id);
-	write_unlock(&shrinker_rwlock);
-	spin_unlock(&shrinker_lock);
+	up_write(&shrinker_rwsem);
 }
 
 static bool global_reclaim(struct scan_control *sc)
@@ -441,15 +430,13 @@ void free_prealloced_shrinker(struct shrinker *shrinker)
 
 void register_shrinker_prepared(struct shrinker *shrinker)
 {
-	init_rwsem(&shrinker->del_rwsem);
-	spin_lock(&shrinker_lock);
-	/* Use the RCU list mutation primitive to allow concurrent iteration */
-	list_add_tail_rcu(&shrinker->list, &shrinker_list);
+	down_write(&shrinker_rwsem);
+	list_add_tail(&shrinker->list, &shrinker_list);
 #ifdef CONFIG_MEMCG
 	if (shrinker->flags & SHRINKER_MEMCG_AWARE)
 		idr_replace(&shrinker_idr, shrinker, shrinker->id);
 #endif
-	spin_unlock(&shrinker_lock);
+	up_write(&shrinker_rwsem);
 }
 
 int register_shrinker(struct shrinker *shrinker)
@@ -470,24 +457,11 @@ void unregister_shrinker(struct shrinker *shrinker)
 {
 	if (!shrinker->nr_deferred)
 		return;
-
-	/*
-	 * Wait until the shrinker is no longer in use (shrinker->del_rwsem)
-	 * Wait until shrinkers are no longer being added (shrinker_lock)
-	 * Wait until the shrinker list is no longer in use (shrinker_rwlock)
-	 */
-	down_write(&shrinker->del_rwsem);
-	spin_lock(&shrinker_lock);
-	write_lock(&shrinker_rwlock);
-	list_del(&shrinker->list);
-#ifdef CONFIG_MEMCG
 	if (shrinker->flags & SHRINKER_MEMCG_AWARE)
-		idr_remove(&shrinker_idr, shrinker->id);
-#endif
-	write_unlock(&shrinker_rwlock);
-	spin_unlock(&shrinker_lock);
-	up_write(&shrinker->del_rwsem);
-
+		unregister_memcg_shrinker(shrinker);
+	down_write(&shrinker_rwsem);
+	list_del(&shrinker->list);
+	up_write(&shrinker_rwsem);
 	kfree(shrinker->nr_deferred);
 	shrinker->nr_deferred = NULL;
 }
@@ -626,77 +600,47 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
 }
 
 #ifdef CONFIG_MEMCG
-static void clear_shrinker_bit(struct mem_cgroup *memcg, int nid, int i)
-{
-	struct memcg_shrinker_map *map;
-
-	if (unlikely(!memcg))
-		return;
-
-	rcu_read_lock();
-	map = rcu_dereference(memcg->nodeinfo[nid]->shrinker_map);
-	if (likely(map))
-		clear_bit(i, map->map);
-	rcu_read_unlock();
-}
-
 static unsigned long shrink_slab_memcg(gfp_t gfp_mask, int nid,
 			struct mem_cgroup *memcg, int priority)
 {
+	struct memcg_shrinker_map *map;
 	unsigned long ret, freed = 0;
-	int index = 0;
+	int i;
 
-	if (!memcg || !mem_cgroup_online(memcg))
+	if (!mem_cgroup_online(memcg))
 		return 0;
 
-	while (index < READ_ONCE(shrinker_nr_max)) {
+	if (!down_read_trylock(&shrinker_rwsem))
+		return 0;
+
+	map = rcu_dereference_protected(memcg->nodeinfo[nid]->shrinker_map,
+					true);
+	if (unlikely(!map))
+		goto unlock;
+
+	for_each_set_bit(i, map->map, shrinker_nr_max) {
 		struct shrink_control sc = {
 			.gfp_mask = gfp_mask,
 			.nid = nid,
 			.memcg = memcg,
 		};
-		struct memcg_shrinker_map *map;
 		struct shrinker *shrinker;
-		int i;
 
-		rcu_read_lock();
-		map = rcu_dereference(memcg->nodeinfo[nid]->shrinker_map);
-		if (unlikely(!map)) {
-			rcu_read_unlock();
-			break;
-		}
-		i = find_next_bit(map->map, READ_ONCE(shrinker_nr_max), index);
-		rcu_read_unlock();
-
-		if (i >= READ_ONCE(shrinker_nr_max))
-			break;
-		index = i + 1;
-
-		read_lock(&shrinker_rwlock);
 		shrinker = idr_find(&shrinker_idr, i);
 		if (unlikely(!shrinker || shrinker == SHRINKER_REGISTERING)) {
-			read_unlock(&shrinker_rwlock);
 			if (!shrinker)
-				clear_shrinker_bit(memcg, nid, i);
+				clear_bit(i, map->map);
 			continue;
 		}
 
 		/* Call non-slab shrinkers even though kmem is disabled */
 		if (!memcg_kmem_enabled() &&
-		    !(shrinker->flags & SHRINKER_NONSLAB)) {
-			read_unlock(&shrinker_rwlock);
+		    !(shrinker->flags & SHRINKER_NONSLAB))
 			continue;
-		}
-
-		if (!down_read_trylock(&shrinker->del_rwsem)) {
-			read_unlock(&shrinker_rwlock);
-			continue;
-		}
-		read_unlock(&shrinker_rwlock);
 
 		ret = do_shrink_slab(&sc, shrinker, priority);
 		if (ret == SHRINK_EMPTY) {
-			clear_shrinker_bit(memcg, nid, i);
+			clear_bit(i, map->map);
 			/*
 			 * After the shrinker reported that it had no objects to
 			 * free, but before we cleared the corresponding bit in
@@ -720,8 +664,14 @@ static unsigned long shrink_slab_memcg(gfp_t gfp_mask, int nid,
 				memcg_set_shrinker_bit(memcg, nid, i);
 		}
 		freed += ret;
-		up_read(&shrinker->del_rwsem);
+
+		if (rwsem_is_contended(&shrinker_rwsem)) {
+			freed = freed ? : 1;
+			break;
+		}
 	}
+unlock:
+	up_read(&shrinker_rwsem);
 	return freed;
 }
 #else /* CONFIG_MEMCG */
@@ -769,29 +719,33 @@ static unsigned long shrink_slab(gfp_t gfp_mask, int nid,
 	if (!mem_cgroup_disabled() && memcg && !mem_cgroup_is_root(memcg))
 		return shrink_slab_memcg(gfp_mask, nid, memcg, priority);
 
-	read_lock(&shrinker_rwlock);
-	/* Use the RCU list iteration primitive to allow concurrent additions */
-	list_for_each_entry_rcu(shrinker, &shrinker_list, list) {
+	if (!down_read_trylock(&shrinker_rwsem))
+		goto out;
+
+	list_for_each_entry(shrinker, &shrinker_list, list) {
 		struct shrink_control sc = {
 			.gfp_mask = gfp_mask,
 			.nid = nid,
 			.memcg = memcg,
 		};
 
-		if (!down_read_trylock(&shrinker->del_rwsem))
-			continue;
-		read_unlock(&shrinker_rwlock);
-
 		ret = do_shrink_slab(&sc, shrinker, priority);
 		if (ret == SHRINK_EMPTY)
 			ret = 0;
 		freed += ret;
-
-		read_lock(&shrinker_rwlock);
-		up_read(&shrinker->del_rwsem);
+		/*
+		 * Bail out if someone want to register a new shrinker to
+		 * prevent the regsitration from being stalled for long periods
+		 * by parallel ongoing shrinking.
+		 */
+		if (rwsem_is_contended(&shrinker_rwsem)) {
+			freed = freed ? : 1;
+			break;
+		}
 	}
-	read_unlock(&shrinker_rwlock);
 
+	up_read(&shrinker_rwsem);
+out:
 	cond_resched();
 	return freed;
 }
@@ -2904,6 +2858,9 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 			shrink_node_memcg(pgdat, memcg, sc, &lru_pages);
 			node_lru_pages += lru_pages;
 
+			shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
+				    sc->priority);
+
 			/* Record the group's reclaim efficiency */
 			vmpressure(sc->gfp_mask, memcg, false,
 				   sc->nr_scanned - scanned,
@@ -3222,7 +3179,7 @@ retry:
 	return 0;
 }
 
-static bool allow_direct_reclaim(pg_data_t *pgdat, bool using_kswapd)
+static bool allow_direct_reclaim(pg_data_t *pgdat)
 {
 	struct zone *zone;
 	unsigned long pfmemalloc_reserve = 0;
@@ -3250,10 +3207,6 @@ static bool allow_direct_reclaim(pg_data_t *pgdat, bool using_kswapd)
 		return true;
 
 	wmark_ok = free_pages > pfmemalloc_reserve / 2;
-
-	/* The throttled direct reclaimer is now a kswapd waiter */
-	if (unlikely(!using_kswapd && !wmark_ok))
-		atomic_long_inc(&kswapd_waiters);
 
 	/* kswapd must be awake if processes are being throttled */
 	if (!wmark_ok && waitqueue_active(&pgdat->kswapd_wait)) {
@@ -3320,7 +3273,7 @@ static bool throttle_direct_reclaim(gfp_t gfp_mask, struct zonelist *zonelist,
 
 		/* Throttle based on the first usable node */
 		pgdat = zone->zone_pgdat;
-		if (allow_direct_reclaim(pgdat, gfp_mask & __GFP_KSWAPD_RECLAIM))
+		if (allow_direct_reclaim(pgdat))
 			goto out;
 		break;
 	}
@@ -3342,18 +3295,16 @@ static bool throttle_direct_reclaim(gfp_t gfp_mask, struct zonelist *zonelist,
 	 */
 	if (!(gfp_mask & __GFP_FS)) {
 		wait_event_interruptible_timeout(pgdat->pfmemalloc_wait,
-			allow_direct_reclaim(pgdat, true), HZ);
+			allow_direct_reclaim(pgdat), HZ);
 
 		goto check_pending;
 	}
 
 	/* Throttle until kswapd wakes the process */
 	wait_event_killable(zone->zone_pgdat->pfmemalloc_wait,
-		allow_direct_reclaim(pgdat, true));
+		allow_direct_reclaim(pgdat));
 
 check_pending:
-	if (unlikely(!(gfp_mask & __GFP_KSWAPD_RECLAIM)))
-		atomic_long_dec(&kswapd_waiters);
 	if (fatal_signal_pending(current))
 		return true;
 
@@ -3814,15 +3765,14 @@ restart:
 		 * able to safely make forward progress. Wake them
 		 */
 		if (waitqueue_active(&pgdat->pfmemalloc_wait) &&
-				allow_direct_reclaim(pgdat, true))
+				allow_direct_reclaim(pgdat))
 			wake_up_all(&pgdat->pfmemalloc_wait);
 
 		/* Check if kswapd should be suspending */
 		__fs_reclaim_release();
 		ret = try_to_freeze();
 		__fs_reclaim_acquire();
-		if (ret || kthread_should_stop() ||
-		    !atomic_long_read(&kswapd_waiters))
+		if (ret || kthread_should_stop())
 			break;
 
 		/*
@@ -4070,49 +4020,6 @@ kswapd_try_sleep:
 	return 0;
 }
 
-static int kshrinkd(void *pgdat)
-{
-	pg_data_t *p = pgdat;
-
-	/* This is technically a kswapd thread */
-	current->flags |= PF_KSWAPD;
-	set_freezable();
-	while (1) {
-		unsigned int pri = DEF_PRIORITY;
-		bool stop;
-
-		wait_event_freezable(p->kshrinkd_wait,
-				     (stop = kthread_should_stop()) ||
-				     atomic_long_read(&kshrinkd_waiters));
-		if (unlikely(stop))
-			break;
-
-		/* Shrink slabs on both kswapd and direct reclaimers' behalf */
-		while (1) {
-			struct mem_cgroup *memcg;
-
-			memcg = mem_cgroup_iter(NULL, NULL, NULL);
-			do {
-				shrink_slab(GFP_KERNEL, p->node_id, memcg, pri);
-				if (unlikely(kthread_should_stop())) {
-					mem_cgroup_iter_break(NULL, memcg);
-					break;
-				}
-			} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)) != NULL);
-
-			if (unlikely(kthread_should_stop()) ||
-			    !atomic_long_read(&kshrinkd_waiters))
-				break;
-
-			/* Iterate down each possible priority and then wrap */
-			pri = (pri - 1) % (DEF_PRIORITY + 1);
-		}
-	}
-	current->flags &= ~PF_KSWAPD;
-
-	return 0;
-}
-
 /*
  * A zone is low on free memory or too fragmented for high-order memory.  If
  * kswapd should reclaim (direct reclaim is deferred), wake it up for the zone's
@@ -4163,7 +4070,6 @@ void wakeup_kswapd(struct zone *zone, gfp_t gfp_flags, int order,
 	trace_mm_vmscan_wakeup_kswapd(pgdat->node_id, classzone_idx, order,
 				      gfp_flags);
 	wake_up_interruptible(&pgdat->kswapd_wait);
-	wake_up_interruptible(&pgdat->kshrinkd_wait);
 }
 
 #ifdef CONFIG_HIBERNATION
@@ -4238,16 +4144,6 @@ int kswapd_run(int nid)
 	if (pgdat->kswapd)
 		return 0;
 
-	pgdat->kshrinkd = kthread_run(kshrinkd, pgdat, "kshrinkd%d", nid);
-	if (IS_ERR(pgdat->kshrinkd)) {
-		/* failure at boot is fatal */
-		BUG_ON(system_state < SYSTEM_RUNNING);
-		pr_err("Failed to start kshrinkd on node %d\n", nid);
-		ret = PTR_ERR(pgdat->kshrinkd);
-		pgdat->kshrinkd = NULL;
-		return ret;
-	}
-
 	pgdat->kswapd = kthread_run(kswapd, pgdat, "kswapd%d", nid);
 	if (IS_ERR(pgdat->kswapd)) {
 		/* failure at boot is fatal */
@@ -4255,8 +4151,6 @@ int kswapd_run(int nid)
 		pr_err("Failed to start kswapd on node %d\n", nid);
 		ret = PTR_ERR(pgdat->kswapd);
 		pgdat->kswapd = NULL;
-		kthread_stop(pgdat->kshrinkd);
-		pgdat->kshrinkd = NULL;
 	}
 	return ret;
 }
@@ -4268,16 +4162,10 @@ int kswapd_run(int nid)
 void kswapd_stop(int nid)
 {
 	struct task_struct *kswapd = NODE_DATA(nid)->kswapd;
-	struct task_struct *kshrinkd = NODE_DATA(nid)->kshrinkd;
 
 	if (kswapd) {
 		kthread_stop(kswapd);
 		NODE_DATA(nid)->kswapd = NULL;
-	}
-
-	if (kshrinkd) {
-		kthread_stop(kshrinkd);
-		NODE_DATA(nid)->kshrinkd = NULL;
 	}
 }
 
