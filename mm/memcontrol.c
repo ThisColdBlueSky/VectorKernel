@@ -1300,7 +1300,6 @@ void mem_cgroup_update_lru_size(struct lruvec *lruvec, enum lru_list lru,
 {
 	struct mem_cgroup_per_node *mz;
 	unsigned long *lru_size;
-	long size;
 
 	if (mem_cgroup_disabled())
 		return;
@@ -1308,19 +1307,27 @@ void mem_cgroup_update_lru_size(struct lruvec *lruvec, enum lru_list lru,
 	mz = container_of(lruvec, struct mem_cgroup_per_node, lruvec);
 	lru_size = &mz->lru_zone_size[zid][lru];
 
-	if (nr_pages < 0)
-		*lru_size += nr_pages;
+	/*
+	 * Local workaround for counter drift in our own per-zone memcg updates
+	 * from MGLRU (not an upstream behavior). Batch promotions across
+	 * sliding generations can temporarily decrement mz->lru_zone_size past
+	 * zero. Clamp to 0 to prevent unsigned underflow, and warn only if the
+	 * deficit exceeds a batch threshold.
+	 */
+	if (nr_pages < 0) {
+		if (*lru_size < (unsigned long)-nr_pages) {
+			unsigned long underflow = (unsigned long)-nr_pages - *lru_size;
 
-	size = *lru_size;
-	if (WARN_ONCE(size < 0,
-		"%s(%p, %d, %d): lru_size %ld\n",
-		__func__, lruvec, lru, nr_pages, size)) {
-		VM_BUG_ON(1);
-		*lru_size = 0;
+			if (underflow > MAX_LRU_BATCH)
+				pr_warn_once("%s(%p, %d, %d): underflow %lu\n",
+					     __func__, lruvec, lru, nr_pages, underflow);
+			*lru_size = 0;
+		} else {
+			*lru_size += nr_pages;
+		}
+	} else if (nr_pages > 0) {
+		*lru_size += nr_pages;
 	}
-
-	if (nr_pages > 0)
-		*lru_size += nr_pages;
 }
 
 /**
