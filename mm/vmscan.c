@@ -257,11 +257,6 @@ static bool global_reclaim(struct scan_control *sc)
 	return !sc->target_mem_cgroup;
 }
 
-static bool cgroup_reclaim(struct scan_control *sc)
-{
-	return !global_reclaim(sc);
-}
-
 /**
  * sane_reclaim - is the usual dirty throttling mechanism operational?
  * @sc: scan_control in question
@@ -5683,9 +5678,8 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 			shrink_node_memcg(pgdat, memcg, sc, &lru_pages);
 			node_lru_pages += lru_pages;
 
-			if (cgroup_reclaim(sc))
-				shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
-					    sc->priority);
+			shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
+				    sc->priority);
 
 			/* Record the group's reclaim efficiency */
 			vmpressure(sc->gfp_mask, memcg, false,
