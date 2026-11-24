@@ -674,7 +674,9 @@ static inline unsigned long vma_iter_addr(struct vma_iterator *vmi)
 #define for_each_vma(vmi, vma)		while ((vma = vma_next(&(vmi))) != NULL)
 
 /* The MM code likes to work with exclusive end addresses */
-#define for_each_vma_range(vmi, vma, end)					while ((vma = vma_find(&(vmi), (end) - 1)) != NULL)
+#define for_each_vma_range(vmi, vma, end)				\
+	while ((vma = vma_find(&(vmi), (end) - 1)) != NULL)
+
 #ifdef CONFIG_SHMEM
 /*
  * The vma_is_shmem is not inline because it is used only by slow
