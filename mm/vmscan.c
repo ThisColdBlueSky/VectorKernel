@@ -3237,9 +3237,6 @@ static void reset_batch_size(struct lruvec *lruvec, struct lru_gen_mm_walk *walk
 		if (lru_gen_is_active(lruvec, gen))
 			lru += LRU_ACTIVE;
 		__update_lru_size(lruvec, lru, zone, delta);
-#ifdef CONFIG_MEMCG
-		mem_cgroup_update_lru_size(lruvec, lru, zone, delta);
-#endif
 	}
 }
 
@@ -3870,10 +3867,6 @@ restart:
 
 			__update_lru_size(lruvec, lru, zone, delta);
 			__update_lru_size(lruvec, lru + LRU_ACTIVE, zone, -delta);
-#ifdef CONFIG_MEMCG
-			mem_cgroup_update_lru_size(lruvec, lru, zone, delta);
-			mem_cgroup_update_lru_size(lruvec, lru + LRU_ACTIVE, zone, -delta);
-#endif
 		}
 	}
 
@@ -4853,6 +4846,37 @@ static void lru_gen_change_state(bool enabled)
 				cond_resched();
 				spin_lock_irq(&pgdat->lru_lock);
 			}
+
+#ifdef CONFIG_MEMCG
+			if (!mem_cgroup_disabled()) {
+				struct mem_cgroup_per_node *mz;
+				enum lru_list l;
+				int z;
+
+				mz = mem_cgroup_nodeinfo(memcg, nid);
+				if (enabled) {
+					for_each_evictable_lru(l) {
+						for (z = 0; z < MAX_NR_ZONES; z++)
+							mz->lru_zone_size[z][l] = 0;
+					}
+				} else {
+					for_each_evictable_lru(l) {
+						unsigned long actual_size[MAX_NR_ZONES] = { 0 };
+						struct page *page;
+
+						list_for_each_entry(page, &lruvec->lists[l], lru) {
+							int zid = page_zonenum(page);
+
+							if (zid < MAX_NR_ZONES)
+								actual_size[zid] += hpage_nr_pages(page);
+						}
+
+						for (z = 0; z < MAX_NR_ZONES; z++)
+							mz->lru_zone_size[z][l] = actual_size[z];
+					}
+				}
+			}
+#endif
 
 			spin_unlock_irq(&pgdat->lru_lock);
 		}
