@@ -818,6 +818,10 @@ ssize_t move_pages(struct mm_struct *mm, struct userfaultfd_ctx *ctx,
 	if (err)
 		goto out_unlock;
 
+	err = -ENOMEM;
+	if (unlikely(anon_vma_prepare(dst_vma)))
+		goto out_unlock;
+
 	err = 0;
 	for (dst_addr = dst_start, src_addr = src_start;
 	     src_addr < src_start + len;
@@ -921,7 +925,7 @@ ssize_t move_pages(struct mm_struct *mm, struct userfaultfd_ctx *ctx,
 			goto out_unlock_pt;
 		}
 
-		moved_pte = ptep_get_and_clear(mm, src_addr, src_pte);
+		moved_pte = ptep_clear_flush(src_vma, src_addr, src_pte);
 		page_move_anon_rmap(page, dst_vma);
 		page->index = linear_page_index(dst_vma, dst_addr);
 		set_pte_at(mm, dst_addr, dst_pte, moved_pte);
@@ -946,9 +950,6 @@ out_unmap:
 			err = -EFAULT;
 		break;
 	}
-
-	if (moved)
-		flush_tlb_range(src_vma, src_start, src_start + moved);
 
 out_unlock:
 	mmap_read_unlock(mm);
