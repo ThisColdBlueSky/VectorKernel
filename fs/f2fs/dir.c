@@ -392,7 +392,7 @@ start_find_bucket:
 		f2fs_put_page(dentry_page, 0);
 	}
 
-	if (de)
+	if (de || IS_ERR(*res_page))
 		return de;
 
 	if (likely(use_hash)) {
@@ -445,7 +445,7 @@ start_find_entry:
 out:
 #if IS_ENABLED(CONFIG_UNICODE)
 	if (f2fs_should_fallback_to_linear(dir) &&
-		IS_CASEFOLDED(dir) && !de && use_hash) {
+		IS_CASEFOLDED(dir) && !de && !IS_ERR(*res_page) && use_hash) {
 		use_hash = false;
 		goto start_find_entry;
 	}
