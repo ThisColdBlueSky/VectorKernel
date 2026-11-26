@@ -517,6 +517,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 	if (retval)
 		goto out;
 
+	mt_clear_in_rcu(&mm->mm_mt);
 	retval = mas_expected_entries(&mas, oldmm->map_count);
 	if (retval)
 		goto loop_out;
@@ -636,6 +637,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 loop_out:
 	mas_destroy(&mas);
 	mas_destroy(&old_mas);
+	mt_set_in_rcu(&mm->mm_mt);
 out:
 	up_write(&mm->mmap_sem);
 	flush_tlb_mm(oldmm);
