@@ -497,6 +497,8 @@ struct vm_fault {
 	gfp_t gfp_mask;			/* gfp mask to be used for allocations */
 	pgoff_t pgoff;			/* Logical page offset based on vma */
 	unsigned long address;		/* Faulting virtual address */
+	unsigned long vma_flags;
+	pgprot_t vma_page_prot;
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT
 	unsigned int sequence;
 	pmd_t orig_pmd;			/* value of PMD at the time of fault */
