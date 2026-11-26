@@ -3139,17 +3139,6 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 				lru_cache_add_anon(page);
 				swap_readpage(page, true);
 			}
-		} else if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
-			/*
-			 * Don't try readahead during a speculative page fault
-			 * as the VMA's boundaries may change in our back.
-			 * If the page is not in the swap cache and synchronous
-			 * read is disabled, fall back to the regular page fault
-			 * mechanism.
-			 */
-			delayacct_clear_flag(DELAYACCT_PF_SWAPIN);
-			ret = VM_FAULT_RETRY;
-			goto out;
 		} else {
 			page = swapin_readahead(entry, GFP_HIGHUSER_MOVABLE,
 						vmf);
@@ -4087,8 +4076,10 @@ static vm_fault_t do_numa_page(struct vm_fault *vmf)
 	 * validation through pte_unmap_same(). It's of NUMA type but
 	 * the pfn may be screwed if the read is non atomic.
 	 */
-	if (!pte_spinlock(vmf))
+	if (!pte_spinlock(vmf)) {
+		pte_unmap(vmf->pte);
 		return VM_FAULT_RETRY;
+	}
 	if (unlikely(!pte_same(*vmf->pte, vmf->orig_pte))) {
 		pte_unmap_unlock(vmf->pte, vmf->ptl);
 		goto out;
@@ -4284,8 +4275,10 @@ skip_pmd_checks:
 	if (pte_protnone(vmf->orig_pte) && vma_is_accessible(vmf->vma))
 		return do_numa_page(vmf);
 
-	if (!pte_spinlock(vmf))
+	if (!pte_spinlock(vmf)) {
+		pte_unmap(vmf->pte);
 		return VM_FAULT_RETRY;
+	}
 	entry = vmf->orig_pte;
 	if (unlikely(!pte_same(*vmf->pte, entry)))
 		goto unlock;
@@ -4505,14 +4498,17 @@ int __handle_speculative_fault(struct mm_struct *mm, unsigned long address,
 	if (!arch_vma_access_permitted(vmf.vma, flags & FAULT_FLAG_WRITE,
 				       flags & FAULT_FLAG_INSTRUCTION,
 				       flags & FAULT_FLAG_REMOTE))
-		goto out_segv;
+		return VM_FAULT_RETRY;
 
-	/* This is required to check that the VMA has write access set */
+	/* This is required to check that the VMA has write/exec/read access */
 	if (flags & FAULT_FLAG_WRITE) {
 		if (unlikely(!(vmf.vma_flags & VM_WRITE)))
-			goto out_segv;
-	} else if (unlikely(!(vmf.vma_flags & (VM_READ|VM_EXEC|VM_WRITE))))
-		goto out_segv;
+			return VM_FAULT_RETRY;
+	} else if (flags & FAULT_FLAG_INSTRUCTION) {
+		if (unlikely(!(vmf.vma_flags & VM_EXEC)))
+			return VM_FAULT_RETRY;
+	} else if (unlikely(!(vmf.vma_flags & (VM_READ | VM_EXEC | VM_WRITE))))
+		return VM_FAULT_RETRY;
 
 #ifdef CONFIG_NUMA
 	if (vma_policy(vmf.vma))
@@ -4620,7 +4616,7 @@ int __handle_speculative_fault(struct mm_struct *mm, unsigned long address,
 	/*
 	 * If there is no need to retry, don't return the vma to the caller.
 	 */
-	if (ret != VM_FAULT_RETRY) {
+	if (!(ret & VM_FAULT_RETRY)) {
 		check_sync_rss_stat(current);
 		if (vma_is_anonymous(vmf.vma))
 			count_vm_event(SPECULATIVE_PGFAULT_ANON);
@@ -4643,15 +4639,6 @@ int __handle_speculative_fault(struct mm_struct *mm, unsigned long address,
 out_walk:
 	local_irq_enable();
 	return VM_FAULT_RETRY;
-
-out_segv:
-	/*
-	 * We don't return VM_FAULT_RETRY so the caller is not expected to
-	 * retrieve the fetched VMA.
-	 */
-	put_vma(vmf.vma);
-	*vma = NULL;
-	return VM_FAULT_SIGSEGV;
 }
 
 /*

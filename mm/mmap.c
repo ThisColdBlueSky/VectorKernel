@@ -643,7 +643,7 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 {
 	struct mm_struct *mm = vma->vm_mm;
 	struct vm_area_struct *next = vma->vm_next, *orig_vma = vma;
-	struct vm_area_struct *next_next;
+	struct vm_area_struct *next_next = NULL;
 	struct address_space *mapping = NULL;
 	struct rb_root_cached *root = NULL;
 	struct anon_vma *anon_vma = NULL;
@@ -921,7 +921,7 @@ again:
 		 * we must remove another next too. It would clutter
 		 * up the code too much to do both in one go.
 		 */
-		if (remove_next != 3) {
+		if (remove_next == 2) {
 			/*
 			 * If "next" was removed and vma->vm_end was
 			 * expanded (up) over it, in turn
@@ -931,6 +931,10 @@ again:
 			next = next_next;
 			if (next)
 				vm_write_begin(next);
+			remove_next = 1;
+			goto again;
+		} else if (remove_next == 1) {
+			next = NULL;
 		} else {
 			/*
 			 * For the scope of the comment "next" and
@@ -944,11 +948,7 @@ again:
 			 */
 			next = vma;
 		}
-		if (remove_next == 2) {
-			remove_next = 1;
-			goto again;
-		}
-		else {
+		{
 			/*
 			 * If remove_next == 2 we obviously can't
 			 * reach this path.

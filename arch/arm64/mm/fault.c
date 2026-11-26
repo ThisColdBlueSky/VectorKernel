@@ -507,7 +507,8 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	 * mmap_sem.
 	 */
 	fault = handle_speculative_fault(mm, addr, mm_flags, &vma);
-	if (fault != VM_FAULT_RETRY)
+	major |= fault & VM_FAULT_MAJOR;
+	if (!(fault & VM_FAULT_RETRY))
 		goto done;
 
 	/*

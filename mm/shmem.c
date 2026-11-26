@@ -1788,6 +1788,10 @@ repeat:
 	}
 
 	if (xa_is_value(page)) {
+		if (vmf && (vmf->flags & FAULT_FLAG_SPECULATIVE)) {
+			*fault_type = VM_FAULT_RETRY;
+			return 0;
+		}
 		error = shmem_swapin_page(inode, index, &page,
 					  sgp, gfp, vma, fault_type);
 		if (error == -EEXIST)

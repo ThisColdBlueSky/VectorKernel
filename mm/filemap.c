@@ -2682,7 +2682,7 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 		 * This is not ideal, we would prefer to guarantee the
 		 * update will happen exactly once.
 		 */
-		if (!(vmf->vma->vm_flags & VM_RAND_READ) && ra->ra_pages) {
+		if (!(vmf->vma_flags & VM_RAND_READ) && ra->ra_pages) {
 			unsigned int mmap_miss = READ_ONCE(ra->mmap_miss);
 			if (mmap_miss)
 				WRITE_ONCE(ra->mmap_miss, --mmap_miss);
