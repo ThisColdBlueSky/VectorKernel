@@ -42,6 +42,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/mm.h>
 #include <linux/sched/mm.h>
+#include <linux/shmem_fs.h>
 #include <linux/sched/coredump.h>
 #include <linux/sched/numa_balancing.h>
 #include <linux/sched/task.h>
@@ -2661,6 +2662,7 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	 * Re-check the pte - we dropped the lock
 	 */
 	if (!pte_map_lock(vmf)) {
+		mmu_notifier_invalidate_range_end(&range);
 		ret = VM_FAULT_RETRY;
 		goto out_uncharge;
 	}
@@ -4466,8 +4468,16 @@ int __handle_speculative_fault(struct mm_struct *mm, unsigned long address,
 	vmf.vma_flags = READ_ONCE(vmf.vma->vm_flags);
 	vmf.vma_page_prot = READ_ONCE(vmf.vma->vm_page_prot);
 
-	/* Can't call userland page fault handler in the speculative path */
-	if (unlikely(vmf.vma_flags & VM_UFFD_MISSING))
+	/* Can't call userland, hugetlb, pfnmap/mixedmap, or arbitrary vm_ops */
+	if (unlikely(vmf.vma_flags & (VM_HUGETLB | VM_PFNMAP | VM_MIXEDMAP |
+				      VM_UFFD_MISSING)))
+		return VM_FAULT_RETRY;
+
+	if (vmf.vma->vm_ops && vmf.vma->vm_ops->fault != filemap_fault
+#ifdef CONFIG_SHMEM
+	    && vmf.vma->vm_ops->fault != shmem_fault
+#endif
+	    )
 		return VM_FAULT_RETRY;
 
 	if (vmf.vma_flags & VM_GROWSDOWN || vmf.vma_flags & VM_GROWSUP)
@@ -4495,6 +4505,9 @@ int __handle_speculative_fault(struct mm_struct *mm, unsigned long address,
 		goto out_segv;
 
 #ifdef CONFIG_NUMA
+	if (vma_policy(vmf.vma))
+		return VM_FAULT_RETRY;
+
 	/*
 	 * MPOL_INTERLEAVE implies additional checks in
 	 * mpol_misplaced() which are not compatible with the
