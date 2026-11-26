@@ -225,12 +225,13 @@ static inline bool trylock_vma_ref_count(struct vm_area_struct *vma)
  */
 static inline void unlock_vma_ref_count(struct vm_area_struct *vma)
 {
+	int old = atomic_cmpxchg(&vma->vm_ref_count, -1, 1);
+
 	/*
 	 * This should only be called after a corresponding,
 	 * successful trylock_vma_ref_count().
 	 */
-	VM_BUG_ON_VMA(atomic_cmpxchg(&vma->vm_ref_count, -1, 1) != -1,
-		      vma);
+	VM_BUG_ON_VMA(old != -1, vma);
 }
 #else	/* !CONFIG_SPECULATIVE_PAGE_FAULT */
 static inline bool trylock_vma_ref_count(struct vm_area_struct *vma)
@@ -317,6 +318,9 @@ static bool move_normal_pud(struct vm_area_struct *vma, unsigned long old_addr,
 	 * should have released it.
 	 */
 	if (WARN_ON_ONCE(!pud_none(*new_pud)))
+		return false;
+
+	if (!trylock_vma_ref_count(vma))
 		return false;
 
 	/*

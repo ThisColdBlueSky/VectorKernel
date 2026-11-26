@@ -3681,8 +3681,9 @@ vm_fault_t alloc_set_pte(struct vm_fault *vmf, struct mem_cgroup *memcg,
 	pte_t entry;
 	vm_fault_t ret;
 
-	if (pmd_none(*vmf->pmd) && PageTransCompound(page) &&
-			IS_ENABLED(CONFIG_TRANSPARENT_HUGE_PAGECACHE)) {
+	if (!(vmf->flags & FAULT_FLAG_SPECULATIVE) &&
+	    pmd_none(*vmf->pmd) && PageTransCompound(page) &&
+	    IS_ENABLED(CONFIG_TRANSPARENT_HUGE_PAGECACHE)) {
 		/* THP on COW? */
 		VM_BUG_ON_PAGE(memcg, page);
 
@@ -4469,16 +4470,25 @@ int __handle_speculative_fault(struct mm_struct *mm, unsigned long address,
 	vmf.vma_page_prot = READ_ONCE(vmf.vma->vm_page_prot);
 
 	/* Can't call userland, hugetlb, pfnmap/mixedmap, or arbitrary vm_ops */
-	if (unlikely(vmf.vma_flags & (VM_HUGETLB | VM_PFNMAP | VM_MIXEDMAP |
-				      VM_UFFD_MISSING)))
+	if (unlikely((vmf.vma_flags & (VM_HUGETLB | VM_PFNMAP | VM_MIXEDMAP |
+				       VM_UFFD_MISSING)) ||
+		     READ_ONCE(vmf.vma->vm_userfaultfd_ctx.ctx)))
 		return VM_FAULT_RETRY;
 
-	if (vmf.vma->vm_ops && vmf.vma->vm_ops->fault != filemap_fault
+	if (vmf.vma->vm_ops) {
+		if (vmf.vma->vm_ops->fault != filemap_fault
 #ifdef CONFIG_SHMEM
-	    && vmf.vma->vm_ops->fault != shmem_fault
+		    && vmf.vma->vm_ops->fault != shmem_fault
 #endif
-	    )
-		return VM_FAULT_RETRY;
+		    )
+			return VM_FAULT_RETRY;
+		if (vmf.vma->vm_ops->map_pages &&
+		    vmf.vma->vm_ops->map_pages != filemap_map_pages)
+			return VM_FAULT_RETRY;
+		if (vmf.vma->vm_ops->page_mkwrite ||
+		    vmf.vma->vm_ops->pfn_mkwrite)
+			return VM_FAULT_RETRY;
+	}
 
 	if (vmf.vma_flags & VM_GROWSDOWN || vmf.vma_flags & VM_GROWSUP)
 		/*

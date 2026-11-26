@@ -1779,6 +1779,10 @@ repeat:
 			unlock_page(page);
 			put_page(page);
 		}
+		if (vmf && (vmf->flags & FAULT_FLAG_SPECULATIVE)) {
+			*fault_type = VM_FAULT_RETRY;
+			return 0;
+		}
 		*fault_type = handle_userfault(vmf, VM_UFFD_MINOR);
 		return 0;
 	}
@@ -1815,6 +1819,10 @@ repeat:
 	 */
 
 	if (vma && userfaultfd_missing(vma)) {
+		if (vmf && (vmf->flags & FAULT_FLAG_SPECULATIVE)) {
+			*fault_type = VM_FAULT_RETRY;
+			return 0;
+		}
 		*fault_type = handle_userfault(vmf, VM_UFFD_MISSING);
 		return 0;
 	}
