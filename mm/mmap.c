@@ -643,6 +643,7 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 {
 	struct mm_struct *mm = vma->vm_mm;
 	struct vm_area_struct *next = vma->vm_next, *orig_vma = vma;
+	struct vm_area_struct *locked_next = next;
 	struct vm_area_struct *next_next = NULL;
 	struct address_space *mapping = NULL;
 	struct rb_root_cached *root = NULL;
@@ -678,8 +679,8 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 	 * for it to move, see vma_has_changed() and handle_speculative_fault().
 	 */
 	vm_write_begin(vma);
-	if (next)
-		vm_write_begin(next);
+	if (locked_next)
+		vm_write_begin(locked_next);
 
 	if (next && !insert) {
 		if (end >= next->vm_end) {
@@ -759,8 +760,8 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 			importer->anon_vma = exporter->anon_vma;
 			error = anon_vma_clone(importer, exporter);
 			if (error) {
-				if (next && next != vma)
-					vm_write_end(next);
+				if (locked_next)
+					vm_write_end(locked_next);
 				vm_write_end(vma);
 				return error;
 			}
@@ -768,8 +769,8 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 	}
 
 	if (mas_preallocate(&mas, vma, GFP_KERNEL)) {
-		if (next && next != vma)
-			vm_write_end(next);
+		if (locked_next)
+			vm_write_end(locked_next);
 		vm_write_end(vma);
 		return -ENOMEM;
 	}
@@ -911,6 +912,7 @@ again:
 			anon_vma_merge(vma, next);
 		mm->map_count--;
 		vm_write_end(next);
+		locked_next = NULL;
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT
 		WRITE_ONCE(next->vm_detached, true);
 		smp_wmb();
@@ -921,7 +923,7 @@ again:
 		 * we must remove another next too. It would clutter
 		 * up the code too much to do both in one go.
 		 */
-		if (remove_next == 2) {
+		if (remove_next != 3) {
 			/*
 			 * If "next" was removed and vma->vm_end was
 			 * expanded (up) over it, in turn
@@ -929,12 +931,6 @@ again:
 			 * "vma->vm_next" gap must be updated.
 			 */
 			next = next_next;
-			if (next)
-				vm_write_begin(next);
-			remove_next = 1;
-			goto again;
-		} else if (remove_next == 1) {
-			next = NULL;
 		} else {
 			/*
 			 * For the scope of the comment "next" and
@@ -948,7 +944,14 @@ again:
 			 */
 			next = vma;
 		}
-		{
+		if (remove_next == 2) {
+			if (next) {
+				vm_write_begin(next);
+				locked_next = next;
+			}
+			remove_next = 1;
+			goto again;
+		} else {
 			/*
 			 * If remove_next == 2 we obviously can't
 			 * reach this path.
@@ -974,8 +977,8 @@ again:
 	if (insert && file)
 		uprobe_mmap(insert);
 
-	if (next && next != vma)
-		vm_write_end(next);
+	if (locked_next)
+		vm_write_end(locked_next);
 	if (!keep_locked)
 		vm_write_end(vma);
 
