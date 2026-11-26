@@ -168,6 +168,35 @@ void unlink_file_vma(struct vm_area_struct *vma)
 	}
 }
 
+static void __free_vma(struct vm_area_struct *vma)
+{
+	if (vma->vm_file)
+		fput(vma->vm_file);
+	mpol_put(vma_policy(vma));
+	vm_area_free(vma);
+}
+
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+static void __free_vma_rcu(struct rcu_head *rcu)
+{
+	struct vm_area_struct *vma = container_of(rcu, struct vm_area_struct,
+						  vm_rcu);
+
+	__free_vma(vma);
+}
+
+void put_vma(struct vm_area_struct *vma)
+{
+	if (atomic_dec_and_test(&vma->vm_ref_count))
+		call_rcu(&vma->vm_rcu, __free_vma_rcu);
+}
+#else
+static inline void put_vma(struct vm_area_struct *vma)
+{
+	__free_vma(vma);
+}
+#endif
+
 /*
  * Close a vm structure and free it, returning the next.
  */
@@ -178,10 +207,10 @@ static struct vm_area_struct *remove_vma(struct vm_area_struct *vma)
 	might_sleep();
 	if (vma->vm_ops && vma->vm_ops->close)
 		vma->vm_ops->close(vma);
-	if (vma->vm_file)
-		fput(vma->vm_file);
-	mpol_put(vma_policy(vma));
-	vm_area_free(vma);
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	WRITE_ONCE(vma->vm_detached, true);
+#endif
+	put_vma(vma);
 	return next;
 }
 
@@ -523,6 +552,11 @@ void vma_mas_remove(struct vm_area_struct *vma, struct ma_state *mas)
 	mas->index = vma->vm_start;
 	mas->last = vma->vm_end - 1;
 	mas_store_prealloc(mas, NULL);
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	WRITE_ONCE(vma->vm_detached, true);
+	/* Ensure removal is visible before checking vm_detached */
+	smp_wmb();
+#endif
 }
 
 /*
@@ -867,16 +901,17 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 
 	if (remove_next) {
 again:
-		if (file) {
+		if (file)
 			uprobe_munmap(next, next->vm_start, next->vm_end);
-			fput(file);
-		}
 		if (next->anon_vma)
 			anon_vma_merge(vma, next);
 		mm->map_count--;
-		mpol_put(vma_policy(next));
 		vm_raw_write_end(next);
-		vm_area_free(next);
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+		WRITE_ONCE(next->vm_detached, true);
+		smp_wmb();
+#endif
+		put_vma(next);
 		/*
 		 * In mprotect's case 6 (see comments on vma_merge),
 		 * we must remove another next too. It would clutter
@@ -2159,6 +2194,23 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 }
 EXPORT_SYMBOL(find_vma);
 
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+struct vm_area_struct *get_vma(struct mm_struct *mm, unsigned long addr)
+{
+	struct vm_area_struct *vma;
+	unsigned long index = addr;
+
+	rcu_read_lock();
+	vma = mt_find(&mm->mm_mt, &index, ULONG_MAX);
+	if (vma && (READ_ONCE(vma->vm_detached) ||
+		    !atomic_inc_not_zero(&vma->vm_ref_count)))
+		vma = NULL;
+	rcu_read_unlock();
+
+	return vma;
+}
+#endif
+
 /**
  * find_vma_prev() - Find the VMA for a given address, or the next vma and
  * set %pprev to the previous VMA, if any.
@@ -2568,10 +2620,16 @@ detach_vmas_to_be_unmapped(struct mm_struct *mm, struct ma_state *mas,
 	mas_set_range(mas, vma->vm_start, end - 1);
 	mas_store_prealloc(mas, NULL);
 	do {
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+		WRITE_ONCE(vma->vm_detached, true);
+#endif
 		mm->map_count--;
 		tail_vma = vma;
 		vma = vma->vm_next;
 	} while (vma && vma->vm_start < end);
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	smp_wmb();
+#endif
 	*insertion_point = vma;
 	if (vma) {
 		vma->vm_prev = prev;

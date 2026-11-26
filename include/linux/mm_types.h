@@ -359,6 +359,9 @@ struct vm_area_struct {
 
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT
 	seqcount_t vm_sequence;
+	atomic_t vm_ref_count;		/* see get_vma(), put_vma() */
+	bool vm_detached;
+	struct rcu_head vm_rcu;
 #endif
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);
