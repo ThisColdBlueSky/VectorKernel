@@ -2195,6 +2195,17 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 EXPORT_SYMBOL(find_vma);
 
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+static inline bool vma_ref_get_rcu(struct vm_area_struct *vma)
+{
+	int c = atomic_read(&vma->vm_ref_count);
+
+	while (c > 0) {
+		if (atomic_try_cmpxchg(&vma->vm_ref_count, &c, c + 1))
+			return true;
+	}
+	return false;
+}
+
 struct vm_area_struct *get_vma(struct mm_struct *mm, unsigned long addr)
 {
 	struct vm_area_struct *vma;
@@ -2202,8 +2213,11 @@ struct vm_area_struct *get_vma(struct mm_struct *mm, unsigned long addr)
 
 	rcu_read_lock();
 	vma = mt_find(&mm->mm_mt, &index, ULONG_MAX);
-	if (vma && (READ_ONCE(vma->vm_detached) ||
-		    !atomic_inc_not_zero(&vma->vm_ref_count)))
+	/*
+	 * Bail out if VMA is detached/freed (refcount == 0) or locked by a
+	 * concurrent fast mremap (refcount == -1).
+	 */
+	if (vma && (READ_ONCE(vma->vm_detached) || !vma_ref_get_rcu(vma)))
 		vma = NULL;
 	rcu_read_unlock();
 
