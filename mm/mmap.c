@@ -677,9 +677,9 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 	 * never block on it since we just check for its value and never wait
 	 * for it to move, see vma_has_changed() and handle_speculative_fault().
 	 */
-	vm_raw_write_begin(vma);
+	vm_write_begin(vma);
 	if (next)
-		vm_raw_write_begin(next);
+		vm_write_begin(next);
 
 	if (next && !insert) {
 		if (end >= next->vm_end) {
@@ -760,8 +760,8 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 			error = anon_vma_clone(importer, exporter);
 			if (error) {
 				if (next && next != vma)
-					vm_raw_write_end(next);
-				vm_raw_write_end(vma);
+					vm_write_end(next);
+				vm_write_end(vma);
 				return error;
 			}
 		}
@@ -906,7 +906,7 @@ again:
 		if (next->anon_vma)
 			anon_vma_merge(vma, next);
 		mm->map_count--;
-		vm_raw_write_end(next);
+		vm_write_end(next);
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT
 		WRITE_ONCE(next->vm_detached, true);
 		smp_wmb();
@@ -926,7 +926,7 @@ again:
 			 */
 			next = next_next;
 			if (next)
-				vm_raw_write_begin(next);
+				vm_write_begin(next);
 		} else {
 			/*
 			 * For the scope of the comment "next" and
@@ -971,9 +971,9 @@ again:
 		uprobe_mmap(insert);
 
 	if (next && next != vma)
-		vm_raw_write_end(next);
+		vm_write_end(next);
 	if (!keep_locked)
-		vm_raw_write_end(vma);
+		vm_write_end(vma);
 
 	validate_mm(mm);
 	validate_mm_mt(mm);
@@ -3333,7 +3333,7 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 		 * that we protect it right now, and let the caller unprotect
 		 * it once the move is done.
 		 */
-		vm_raw_write_begin(new_vma);
+		vm_write_begin(new_vma);
 		vma_link(mm, new_vma, prev);
 		*need_rmap_locks = false;
 	}
