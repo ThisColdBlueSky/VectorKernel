@@ -1779,11 +1779,19 @@ repeat:
 			unlock_page(page);
 			put_page(page);
 		}
+		if (vmf && (vmf->flags & FAULT_FLAG_SPECULATIVE)) {
+			*fault_type = VM_FAULT_RETRY;
+			return 0;
+		}
 		*fault_type = handle_userfault(vmf, VM_UFFD_MINOR);
 		return 0;
 	}
 
 	if (xa_is_value(page)) {
+		if (vmf && (vmf->flags & FAULT_FLAG_SPECULATIVE)) {
+			*fault_type = VM_FAULT_RETRY;
+			return 0;
+		}
 		error = shmem_swapin_page(inode, index, &page,
 					  sgp, gfp, vma, fault_type);
 		if (error == -EEXIST)
@@ -1815,6 +1823,10 @@ repeat:
 	 */
 
 	if (vma && userfaultfd_missing(vma)) {
+		if (vmf && (vmf->flags & FAULT_FLAG_SPECULATIVE)) {
+			*fault_type = VM_FAULT_RETRY;
+			return 0;
+		}
 		*fault_type = handle_userfault(vmf, VM_UFFD_MISSING);
 		return 0;
 	}
@@ -2002,7 +2014,7 @@ static int synchronous_wake_function(wait_queue_entry_t *wait, unsigned mode, in
 	return ret;
 }
 
-static vm_fault_t shmem_fault(struct vm_fault *vmf)
+vm_fault_t shmem_fault(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct inode *inode = file_inode(vma->vm_file);
@@ -2072,10 +2084,10 @@ static vm_fault_t shmem_fault(struct vm_fault *vmf)
 
 	sgp = SGP_CACHE;
 
-	if ((vma->vm_flags & VM_NOHUGEPAGE) ||
+	if ((vmf->vma_flags & VM_NOHUGEPAGE) ||
 	    test_bit(MMF_DISABLE_THP, &vma->vm_mm->flags))
 		sgp = SGP_NOHUGE;
-	else if (vma->vm_flags & VM_HUGEPAGE)
+	else if (vmf->vma_flags & VM_HUGEPAGE)
 		sgp = SGP_HUGE;
 
 	err = shmem_getpage_gfp(inode, vmf->pgoff, &vmf->page, sgp,

@@ -3243,7 +3243,8 @@ int f2fs_prepare_lookup(struct inode *dir, struct dentry *dentry,
 			struct f2fs_filename *fname);
 void f2fs_free_filename(struct f2fs_filename *fname);
 struct f2fs_dir_entry *f2fs_find_target_dentry(const struct f2fs_dentry_ptr *d,
-			const struct f2fs_filename *fname, int *max_slots);
+			const struct f2fs_filename *fname, int *max_slots,
+			bool use_hash);
 int f2fs_fill_dentries(struct dir_context *ctx, struct f2fs_dentry_ptr *d,
 			unsigned int start_pos, struct fscrypt_str *fstr);
 void f2fs_do_make_empty_dir(struct inode *inode, struct inode *parent,
@@ -3815,7 +3816,8 @@ int f2fs_write_inline_data(struct inode *inode, struct page *page);
 int f2fs_recover_inline_data(struct inode *inode, struct page *npage);
 struct f2fs_dir_entry *f2fs_find_in_inline_dir(struct inode *dir,
 					const struct f2fs_filename *fname,
-					struct page **res_page);
+					struct page **res_page,
+					bool use_hash);
 int f2fs_make_empty_inline_dir(struct inode *inode, struct inode *parent,
 			struct page *ipage);
 int f2fs_add_inline_entry(struct inode *dir, const struct f2fs_filename *fname,
@@ -4228,6 +4230,48 @@ static inline void f2fs_truncate_meta_inode_pages(struct f2fs_sb_info *sbi,
 			F2FS_BLK_TO_BYTES((loff_t)blkaddr),
 			F2FS_BLK_END_BYTES((loff_t)(blkaddr + cnt - 1)));
 }
+
+enum f2fs_lookup_mode {
+	LOOKUP_PERF,
+	LOOKUP_COMPAT,
+	LOOKUP_AUTO,
+};
+
+/*
+ * For bit-packing in f2fs_mount_info->alloc_mode
+ */
+#define ALLOC_MODE_BITS		1
+#define LOOKUP_MODE_BITS	2
+
+#define ALLOC_MODE_SHIFT	0
+#define LOOKUP_MODE_SHIFT	(ALLOC_MODE_SHIFT + ALLOC_MODE_BITS)
+
+#define ALLOC_MODE_MASK		(((1 << ALLOC_MODE_BITS) - 1) << ALLOC_MODE_SHIFT)
+#define LOOKUP_MODE_MASK	(((1 << LOOKUP_MODE_BITS) - 1) << LOOKUP_MODE_SHIFT)
+
+static inline int f2fs_get_alloc_mode(struct f2fs_sb_info *sbi)
+{
+	return (F2FS_OPTION(sbi).alloc_mode & ALLOC_MODE_MASK) >> ALLOC_MODE_SHIFT;
+}
+
+static inline void f2fs_set_alloc_mode(struct f2fs_sb_info *sbi, int mode)
+{
+	F2FS_OPTION(sbi).alloc_mode &= ~ALLOC_MODE_MASK;
+	F2FS_OPTION(sbi).alloc_mode |= (mode << ALLOC_MODE_SHIFT);
+}
+
+static inline enum f2fs_lookup_mode f2fs_get_lookup_mode(struct f2fs_sb_info *sbi)
+{
+	return (F2FS_OPTION(sbi).alloc_mode & LOOKUP_MODE_MASK) >> LOOKUP_MODE_SHIFT;
+}
+
+static inline void f2fs_set_lookup_mode(struct f2fs_sb_info *sbi,
+						enum f2fs_lookup_mode mode)
+{
+	F2FS_OPTION(sbi).alloc_mode &= ~LOOKUP_MODE_MASK;
+	F2FS_OPTION(sbi).alloc_mode |= (mode << LOOKUP_MODE_SHIFT);
+}
+
 #define EFSBADCRC	EBADMSG		/* Bad CRC detected */
 #define EFSCORRUPTED	EUCLEAN		/* Filesystem is corrupted */
 

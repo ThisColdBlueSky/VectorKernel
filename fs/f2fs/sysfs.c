@@ -198,6 +198,29 @@ static ssize_t encoding_show(struct f2fs_attr *a,
 	return sprintf(buf, "(none)");
 }
 
+static ssize_t encoding_flags_show(struct f2fs_attr *a,
+		struct f2fs_sb_info *sbi, char *buf)
+{
+	return sysfs_emit(buf, "%x\n",
+		le16_to_cpu(F2FS_RAW_SUPER(sbi)->s_encoding_flags));
+}
+
+static ssize_t effective_lookup_mode_show(struct f2fs_attr *a,
+		struct f2fs_sb_info *sbi, char *buf)
+{
+	switch (f2fs_get_lookup_mode(sbi)) {
+	case LOOKUP_PERF:
+		return sysfs_emit(buf, "perf\n");
+	case LOOKUP_COMPAT:
+		return sysfs_emit(buf, "compat\n");
+	case LOOKUP_AUTO:
+		if (sb_no_casefold_compat_fallback(sbi->sb))
+			return sysfs_emit(buf, "auto:perf\n");
+		return sysfs_emit(buf, "auto:compat\n");
+	}
+	return 0;
+}
+
 static ssize_t mounted_time_sec_show(struct f2fs_attr *a,
 		struct f2fs_sb_info *sbi, char *buf)
 {
@@ -472,6 +495,9 @@ enum feat_id {
 	FEAT_RO,
 	FEAT_TEST_DUMMY_ENCRYPTION_V2,
 	FEAT_ENCRYPTED_CASEFOLD,
+#ifdef CONFIG_UNICODE
+	FEAT_LINEAR_LOOKUP,
+#endif
 };
 
 static ssize_t f2fs_feature_show(struct f2fs_attr *a,
@@ -495,6 +521,9 @@ static ssize_t f2fs_feature_show(struct f2fs_attr *a,
 	case FEAT_RO:
 	case FEAT_TEST_DUMMY_ENCRYPTION_V2:
 	case FEAT_ENCRYPTED_CASEFOLD:
+#ifdef CONFIG_UNICODE
+	case FEAT_LINEAR_LOOKUP:
+#endif
 		return sprintf(buf, "supported\n");
 	}
 	return 0;
@@ -583,6 +612,8 @@ F2FS_GENERAL_RO_ATTR(features);
 F2FS_GENERAL_RO_ATTR(current_reserved_blocks);
 F2FS_GENERAL_RO_ATTR(unusable);
 F2FS_GENERAL_RO_ATTR(encoding);
+F2FS_GENERAL_RO_ATTR(encoding_flags);
+F2FS_GENERAL_RO_ATTR(effective_lookup_mode);
 F2FS_GENERAL_RO_ATTR(mounted_time_sec);
 #ifdef CONFIG_F2FS_STAT_FS
 F2FS_STAT_ATTR(STAT_INFO, f2fs_stat_info, cp_foreground_calls, cp_count);
@@ -622,6 +653,9 @@ F2FS_FEATURE_RO_ATTR(casefold, FEAT_CASEFOLD);
 F2FS_FEATURE_RO_ATTR(readonly, FEAT_RO);
 #ifdef CONFIG_F2FS_FS_COMPRESSION
 F2FS_FEATURE_RO_ATTR(compression, FEAT_COMPRESSION);
+#endif
+#ifdef CONFIG_UNICODE
+F2FS_FEATURE_RO_ATTR(linear_lookup, FEAT_LINEAR_LOOKUP);
 #endif
 
 #define ATTR_LIST(name) (&f2fs_attr_##name.attr)
@@ -674,6 +708,8 @@ static struct attribute *f2fs_attrs[] = {
 	ATTR_LIST(reserved_blocks),
 	ATTR_LIST(current_reserved_blocks),
 	ATTR_LIST(encoding),
+	ATTR_LIST(encoding_flags),
+	ATTR_LIST(effective_lookup_mode),
 	ATTR_LIST(mounted_time_sec),
 #ifdef CONFIG_F2FS_STAT_FS
 	ATTR_LIST(cp_foreground_calls),
@@ -717,6 +753,9 @@ static struct attribute *f2fs_feat_attrs[] = {
 	ATTR_LIST(readonly),
 #ifdef CONFIG_F2FS_FS_COMPRESSION
 	ATTR_LIST(compression),
+#endif
+#ifdef CONFIG_UNICODE
+	ATTR_LIST(linear_lookup),
 #endif
 	NULL,
 };

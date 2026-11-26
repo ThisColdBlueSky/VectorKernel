@@ -208,6 +208,9 @@ whint_mode=%s          Control which write hints are passed down to block
                        passes down hints with its policy.
 alloc_mode=%s          Adjust block allocation policy, which supports "reuse"
                        and "default".
+lookup_mode=%s         Control the directory lookup behavior for casefolded
+                       directories ("perf", "compat", or "auto"). Default
+                       is "perf" (hash-only lookup).
 fsync_mode=%s          Control the policy of fsync. Currently supports "posix",
                        "strict", and "nobarrier". In "posix" mode, which is
                        default, fsync will follow POSIX semantics and does a

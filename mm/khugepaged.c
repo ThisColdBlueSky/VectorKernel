@@ -918,6 +918,8 @@ static bool __collapse_huge_page_swapin(struct mm_struct *mm,
 		.flags = FAULT_FLAG_ALLOW_RETRY,
 		.pmd = pmd,
 		.pgoff = linear_page_index(vma, address),
+		.vma_flags = vma->vm_flags,
+		.vma_page_prot = vma->vm_page_prot,
 	};
 
 	/* we only decide to swapin, if there is enough young ptes */
@@ -1041,6 +1043,7 @@ static void collapse_huge_page(struct mm_struct *mm,
 	if (mm_find_pmd(mm, address) != pmd)
 		goto out;
 
+	vm_write_begin(vma);
 	anon_vma_lock_write(vma->anon_vma);
 
 	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, NULL, mm,
@@ -1078,6 +1081,7 @@ static void collapse_huge_page(struct mm_struct *mm,
 		pmd_populate(mm, pmd, pmd_pgtable(_pmd));
 		spin_unlock(pmd_ptl);
 		anon_vma_unlock_write(vma->anon_vma);
+		vm_write_end(vma);
 		result = SCAN_FAIL;
 		goto out;
 	}
@@ -1113,6 +1117,7 @@ static void collapse_huge_page(struct mm_struct *mm,
 	set_pmd_at(mm, address, pmd, _pmd);
 	update_mmu_cache_pmd(vma, address, pmd);
 	spin_unlock(pmd_ptl);
+	vm_write_end(vma);
 
 	*hpage = NULL;
 
@@ -1353,6 +1358,7 @@ void collapse_pte_mapped_thp(struct mm_struct *mm, unsigned long addr)
 	 * lockless_pages_from_mm() and the hardware page walker can access page
 	 * tables while all the high-level locks are held in write mode.
 	 */
+	vm_write_begin(vma);
 	start_pte = pte_offset_map_lock(mm, pmd, haddr, &ptl);
 
 	/* step 1: check all mapped PTEs are to the right huge page */
@@ -1407,6 +1413,7 @@ void collapse_pte_mapped_thp(struct mm_struct *mm, unsigned long addr)
 				haddr + HPAGE_PMD_SIZE);
 	mmu_notifier_invalidate_range_start(&range);
 	_pmd = pmdp_collapse_flush(vma, haddr, pmd);
+	vm_write_end(vma);
 	mm_dec_nr_ptes(mm);
 	tlb_remove_table_sync_one();
 	mmu_notifier_invalidate_range_end(&range);
@@ -1423,6 +1430,7 @@ drop_hpage:
 
 abort:
 	pte_unmap_unlock(start_pte, ptl);
+	vm_write_end(vma);
 	i_mmap_unlock_write(vma->vm_file->f_mapping);
 	goto drop_hpage;
 }
@@ -1510,6 +1518,7 @@ static void retract_page_tables(struct address_space *mapping, pgoff_t pgoff)
 					up_write(&mm->mmap_sem);
 					continue;
 				}
+				vm_write_begin(vma);
 				mmu_notifier_range_init(&range,
 							MMU_NOTIFY_CLEAR, 0,
 							NULL, mm, addr,
@@ -1517,6 +1526,7 @@ static void retract_page_tables(struct address_space *mapping, pgoff_t pgoff)
 				mmu_notifier_invalidate_range_start(&range);
 				/* assume page table is clear */
 				_pmd = pmdp_collapse_flush(vma, addr, pmd);
+				vm_write_end(vma);
 				mm_dec_nr_ptes(mm);
 				tlb_remove_table_sync_one();
 				pte_free(mm, pmd_pgtable(_pmd));
