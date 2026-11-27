@@ -111,14 +111,14 @@ object VectorDefaults {
     const val RESUME = 0
     const val BYPASS = 0
     const val ICL = 0
-    const val IGN_CHG = 0
-    const val VENDOR_MAX = 18
-    const val IGN_CPU = 0
+    const val IGN_CHG = 1
+    const val VENDOR_MAX = 0
+    const val IGN_CPU = 1
     const val CPU_LITTLE = 0
     const val CPU_BIG = 0
-    const val IGN_GPU = 0
+    const val IGN_GPU = 1
     const val GPU_MAX = 0
-    const val IGN_BL = 0
+    const val IGN_BL = 1
     const val TRIP = 450
     const val CLEAR = 420
     const val SKIN = 0
@@ -155,9 +155,26 @@ data class Snapshot(
     val tempDeci: Int,
 )
 
+data class ZramRecompState(
+    val supported: Boolean = false,
+    val active: Boolean = false,
+    val bootEnabled: Boolean = false,
+)
+
+data class RepoSnapshot(
+    val snap: Snapshot,
+    val bootInstalled: Boolean,
+    val zramRecomp: ZramRecompState,
+)
+
 object VectorRepo {
     const val BOOT_SCRIPT_DIR = "/data/adb/service.d"
     const val BOOT_SCRIPT_PATH = "/data/adb/service.d/99-vector-link.sh"
+    const val ZRAM_RECOMP_PATH = "/sys/block/zram0/recomp_algorithm"
+    const val ZRAM_RECOMPRESS_PATH = "/sys/block/zram0/recompress"
+    const val ZRAM_POSTFS_DIR = "/data/adb/post-fs-data.d"
+    const val ZRAM_POSTFS_SCRIPT = "/data/adb/post-fs-data.d/99-vector-zram-recomp.sh"
+    const val ZRAM_LEGACY_POSTFS_SCRIPT = "/data/adb/post-fs-data.d/zram_recomp.sh"
 
     // One shell call reads everything.
     private val readScript = buildString {
@@ -168,6 +185,9 @@ object VectorRepo {
             append("echo \"b:$it=\$(cat ${VectorNodes.BATT}/$it 2>/dev/null)\"\n")
         }
         append("if [ -f $BOOT_SCRIPT_PATH ]; then echo \"boot:installed=1\"; else echo \"boot:installed=0\"; fi\n")
+        append("if [ -e $ZRAM_RECOMP_PATH ]; then echo \"zram:supported=1\"; else echo \"zram:supported=0\"; fi\n")
+        append("echo \"zram:recomp=\$(cat $ZRAM_RECOMP_PATH 2>/dev/null)\"\n")
+        append("if [ -f $ZRAM_POSTFS_SCRIPT ] || [ -f $ZRAM_LEGACY_POSTFS_SCRIPT ]; then echo \"zram:boot=1\"; else echo \"zram:boot=0\"; fi\n")
     }
 
     suspend fun hasRoot(): Boolean = withContext(Dispatchers.IO) { Shell.getShell().isRoot }
@@ -176,11 +196,14 @@ object VectorRepo {
         Shell.getCachedShell()?.close()
     }
 
-    suspend fun read(): Pair<Snapshot, Boolean> = withContext(Dispatchers.IO) {
+    suspend fun read(): RepoSnapshot = withContext(Dispatchers.IO) {
         val out = Shell.cmd(readScript).exec().out
         val nodes = HashMap<String, Int>()
         val batt = HashMap<String, String>()
         var bootInstalled = false
+        var zramSupported = false
+        var zramActive = false
+        var zramBoot = false
         for (line in out) {
             val eq = line.indexOf('=')
             if (eq < 2) continue
@@ -192,10 +215,15 @@ object VectorRepo {
                     value.split(" ").firstOrNull()?.toIntOrNull()?.let { nodes[key] = it }
                 line.startsWith("b:") -> batt[key] = value
                 line.startsWith("boot:") -> bootInstalled = (value == "1")
+                line.startsWith("zram:") -> when (key) {
+                    "supported" -> zramSupported = (value == "1")
+                    "recomp" -> zramActive = value.contains("zstd")
+                    "boot" -> zramBoot = (value == "1")
+                }
             }
         }
-        Pair(
-            Snapshot(
+        RepoSnapshot(
+            snap = Snapshot(
                 nodes = nodes,
                 capacity = batt["capacity"]?.toIntOrNull() ?: 0,
                 status = batt["status"].orEmpty(),
@@ -203,7 +231,12 @@ object VectorRepo {
                 voltageUv = batt["voltage_now"]?.toLongOrNull() ?: 0L,
                 tempDeci = batt["temp"]?.toIntOrNull() ?: 0,
             ),
-            bootInstalled
+            bootInstalled = bootInstalled,
+            zramRecomp = ZramRecompState(
+                supported = zramSupported,
+                active = zramActive,
+                bootEnabled = zramBoot,
+            ),
         )
     }
 
@@ -225,6 +258,7 @@ object VectorRepo {
 
     suspend fun restoreDefaults(): Boolean = withContext(Dispatchers.IO) {
         val script = buildString {
+            append("rm -f $ZRAM_POSTFS_SCRIPT $ZRAM_LEGACY_POSTFS_SCRIPT\n")
             VectorDefaults.WRITABLE.forEach { (node, v) ->
                 append("echo $v > ${VectorNodes.DIR}/$node\n")
             }
@@ -234,23 +268,53 @@ object VectorRepo {
         Shell.cmd(script).exec().isSuccess
     }
 
+    suspend fun setZramRecomp(enabled: Boolean): Boolean = withContext(Dispatchers.IO) {
+        if (!enabled) {
+            return@withContext Shell.cmd(
+                "rm -f $ZRAM_POSTFS_SCRIPT $ZRAM_LEGACY_POSTFS_SCRIPT"
+            ).exec().isSuccess
+        }
+        val scriptBody = """
+            #!/system/bin/sh
+            if [ -w $ZRAM_RECOMP_PATH ]; then
+                echo "algo=zstd priority=1" > $ZRAM_RECOMP_PATH
+            fi
+            if command -v resetprop >/dev/null 2>&1; then
+                resetprop mmd.zram.enabled true
+                resetprop mmd.zram.recompression.enabled true
+            fi
+        """.trimIndent() + "\n"
+        val cmd = "mkdir -p $ZRAM_POSTFS_DIR\n" +
+                "rm -f $ZRAM_LEGACY_POSTFS_SCRIPT\n" +
+                "cat << 'EOF' > $ZRAM_POSTFS_SCRIPT\n" +
+                scriptBody +
+                "EOF\n" +
+                "chmod 0755 $ZRAM_POSTFS_SCRIPT\n" +
+                "chown root:root $ZRAM_POSTFS_SCRIPT\n"
+        Shell.cmd(cmd).exec().isSuccess
+    }
+
+    suspend fun recompressHugeNow(): Boolean = withContext(Dispatchers.IO) {
+        Shell.cmd("echo \"type=huge\" > $ZRAM_RECOMPRESS_PATH").exec().isSuccess
+    }
+
     suspend fun applyOnBoot(snap: Snapshot): Boolean = withContext(Dispatchers.IO) {
         val n = snap.nodes
-        val stop = n[VectorNodes.STOP] ?: 0
-        val resume = n[VectorNodes.RESUME] ?: 0
-        val bypass = n[VectorNodes.BYPASS] ?: 0
-        val icl = n[VectorNodes.ICL] ?: 0
-        val ignChg = n[VectorNodes.IGN_CHG] ?: 0
-        val vendorMax = n[VectorNodes.VENDOR_MAX] ?: 18
-        val ignCpu = n[VectorNodes.IGN_CPU] ?: 0
-        val cpuLittle = n[VectorNodes.CPU_LITTLE] ?: 0
-        val cpuBig = n[VectorNodes.CPU_BIG] ?: 0
-        val ignGpu = n[VectorNodes.IGN_GPU] ?: 0
-        val gpuMax = n[VectorNodes.GPU_MAX] ?: 0
-        val ignBl = n[VectorNodes.IGN_BL] ?: 0
-        val trip = n[VectorNodes.TRIP] ?: 450
-        val clear = n[VectorNodes.CLEAR] ?: 420
-        val skin = n[VectorNodes.SKIN] ?: 0
+        val stop = n[VectorNodes.STOP] ?: VectorDefaults.STOP
+        val resume = n[VectorNodes.RESUME] ?: VectorDefaults.RESUME
+        val bypass = n[VectorNodes.BYPASS] ?: VectorDefaults.BYPASS
+        val icl = n[VectorNodes.ICL] ?: VectorDefaults.ICL
+        val ignChg = n[VectorNodes.IGN_CHG] ?: VectorDefaults.IGN_CHG
+        val vendorMax = n[VectorNodes.VENDOR_MAX] ?: VectorDefaults.VENDOR_MAX
+        val ignCpu = n[VectorNodes.IGN_CPU] ?: VectorDefaults.IGN_CPU
+        val cpuLittle = n[VectorNodes.CPU_LITTLE] ?: VectorDefaults.CPU_LITTLE
+        val cpuBig = n[VectorNodes.CPU_BIG] ?: VectorDefaults.CPU_BIG
+        val ignGpu = n[VectorNodes.IGN_GPU] ?: VectorDefaults.IGN_GPU
+        val gpuMax = n[VectorNodes.GPU_MAX] ?: VectorDefaults.GPU_MAX
+        val ignBl = n[VectorNodes.IGN_BL] ?: VectorDefaults.IGN_BL
+        val trip = n[VectorNodes.TRIP] ?: VectorDefaults.TRIP
+        val clear = n[VectorNodes.CLEAR] ?: VectorDefaults.CLEAR
+        val skin = n[VectorNodes.SKIN] ?: VectorDefaults.SKIN
 
         val scriptBody = buildString {
             append("#!/system/bin/sh\n")
@@ -312,6 +376,7 @@ data class UiState(
     val error: String? = null,
     val infoMessage: String? = null,
     val isBootApplied: Boolean = false,
+    val zramRecomp: ZramRecompState = ZramRecompState(),
 )
 
 private class Pending(val value: Int, val until: Long)
@@ -354,10 +419,18 @@ class VectorViewModel : ViewModel() {
             _state.update { it.copy(gate = Gate.NoRoot) }
             return
         }
-        val (snap, bootInstalled) = VectorRepo.read()
+        val repo = VectorRepo.read()
+        val snap = repo.snap
         if (snap.nodes.isEmpty()) {
             // Nothing readable under /sys/kernel/vector. Keeps retrying on every poll.
-            _state.update { it.copy(gate = Gate.NoNodes, snap = null, isBootApplied = bootInstalled) }
+            _state.update {
+                it.copy(
+                    gate = Gate.NoNodes,
+                    snap = null,
+                    isBootApplied = repo.bootInstalled,
+                    zramRecomp = repo.zramRecomp,
+                )
+            }
             return
         }
 
@@ -374,7 +447,14 @@ class VectorViewModel : ViewModel() {
                 merged[e.key] = e.value.value
             }
         }
-        _state.update { it.copy(gate = Gate.Ready, snap = snap.copy(nodes = merged), isBootApplied = bootInstalled) }
+        _state.update {
+            it.copy(
+                gate = Gate.Ready,
+                snap = snap.copy(nodes = merged),
+                isBootApplied = repo.bootInstalled,
+                zramRecomp = repo.zramRecomp,
+            )
+        }
     }
 
     private fun writeWith(what: String, expected: Map<String, Int>, op: suspend () -> Boolean) {
@@ -492,6 +572,46 @@ class VectorViewModel : ViewModel() {
                     _state.update {
                         it.copy(error = "Failed to remove boot script.")
                     }
+                }
+            }
+        }
+    }
+
+    fun setZramRecomp(enabled: Boolean) {
+        viewModelScope.launch {
+            mutex.withLock {
+                val ok = VectorRepo.setZramRecomp(enabled)
+                val activeNow = _state.value.zramRecomp.active
+                if (ok) {
+                    val msg = when {
+                        enabled && activeNow -> "ZSTD ZRAM recompression is enabled and active."
+                        enabled -> "ZSTD ZRAM recompression enabled for next reboot."
+                        activeNow -> "ZSTD ZRAM recompression disabled (takes effect on next reboot)."
+                        else -> "ZSTD ZRAM recompression disabled."
+                    }
+                    _state.update {
+                        it.copy(
+                            zramRecomp = it.zramRecomp.copy(bootEnabled = enabled),
+                            infoMessage = msg,
+                            error = null,
+                        )
+                    }
+                } else {
+                    _state.update {
+                        it.copy(error = "Failed to update ZRAM recompression script in /data/adb/post-fs-data.d.")
+                    }
+                }
+            }
+        }
+    }
+
+    fun recompressHugeNow() {
+        viewModelScope.launch {
+            mutex.withLock {
+                val ok = VectorRepo.recompressHugeNow()
+                _state.update {
+                    if (ok) it.copy(infoMessage = "Recompressed huge ZRAM pages with ZSTD.", error = null)
+                    else it.copy(error = "Failed to trigger ZRAM recompression.")
                 }
             }
         }
@@ -741,6 +861,7 @@ fun App(vm: VectorViewModel) {
                         error = s.error,
                         infoMessage = s.infoMessage,
                         isBootApplied = s.isBootApplied,
+                        zramRecomp = s.zramRecomp,
                         vm = vm,
                     )
                 }
@@ -774,6 +895,7 @@ fun Dashboard(
     error: String?,
     infoMessage: String?,
     isBootApplied: Boolean,
+    zramRecomp: ZramRecompState,
     vm: VectorViewModel,
 ) {
     val n = snap.nodes
@@ -1081,6 +1203,62 @@ fun Dashboard(
                             "50.0 °C is a reasonable starting point; 45.0 °C is very conservative.",
                         ),
                     ) { vm.set(VectorNodes.SKIN, it) }
+                }
+            }
+        }
+
+        // ---------- Memory & ZRAM ----------
+        if (zramRecomp.supported) item {
+            Section(
+                title = "Memory & ZRAM",
+                subtitle = "Background recompression for incompressible/idle swap pages.",
+            ) {
+                val desc = when {
+                    zramRecomp.bootEnabled && zramRecomp.active ->
+                        "Active (#1: zstd): Recompresses huge/idle LZ4 pages with ZSTD"
+                    zramRecomp.bootEnabled ->
+                        "Pending reboot: Script installed in /data/adb/post-fs-data.d; activates on next boot"
+                    zramRecomp.active ->
+                        "Disabled for next boot: Currently active until you reboot"
+                    else ->
+                        "Disabled: Using primary LZ4 only"
+                }
+                ToggleRow(
+                    title = "ZSTD ZRAM Recompression",
+                    desc = desc,
+                    checked = zramRecomp.bootEnabled,
+                    help = HelpInfo(
+                        "ZSTD ZRAM Recompression",
+                        "Uses LZ4 for fast swap-out and ZSTD v1.5.7 as secondary recompression algorithm (#1). Because zram0/recomp_algorithm must be set before vendor init initializes disksize, Vector Link installs /data/adb/post-fs-data.d/99-vector-zram-recomp.sh and enables Android's mmd properties.\n\nChanges take effect after a reboot.",
+                        "Keep this enabled for higher effective ZRAM capacity without slowing down foreground swap.",
+                    ),
+                ) { enabled ->
+                    vm.setZramRecomp(enabled)
+                }
+
+                if (zramRecomp.active) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Recompress Huge Pages Now",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                "Run ZSTD on incompressible LZ4 pages immediately.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(onClick = vm::recompressHugeNow) {
+                            Text("Run")
+                        }
+                    }
                 }
             }
         }
