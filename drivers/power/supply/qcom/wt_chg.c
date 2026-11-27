@@ -835,14 +835,14 @@ int get_prop_batt_health(struct batt_chg *chg, union power_supply_propval *val)
  * skin_override_max_mc:
  *   Chassis skin temp backstop in millidegC (default: 0 = disabled; clamp 45000-60000 with 2000mC hysteresis)
  */
-static int ignore_vendor_charging_thermal = 0;
-static int vendor_thermal_max_level = 18;
-static int ignore_vendor_cpu_thermal = 0;
+static int ignore_vendor_charging_thermal = 1;
+static int vendor_thermal_max_level = 0;
+static int ignore_vendor_cpu_thermal = 1;
 static unsigned int cpu_little_override_max_state = 0;
 static unsigned int cpu_big_override_max_state = 0;
-static int ignore_vendor_gpu_thermal = 0;
+static int ignore_vendor_gpu_thermal = 1;
 static unsigned int gpu_override_max_state = 0;
-static int ignore_vendor_backlight_thermal = 0;
+static int ignore_vendor_backlight_thermal = 1;
 static int skin_override_max_mc = 0;
 static unsigned int battery_trip_decic = 450;
 static unsigned int battery_clear_decic = 420;
