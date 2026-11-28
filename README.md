@@ -20,5 +20,5 @@ Linux `5.4.302` kernel for Qualcomm Snapdragon 695 (`sm6375` / `blair`), forked 
 - **Charging & Thermal Controls** ([`Documentation/vector.md`](Documentation/vector.md)) — Charge limiter, bypass charging, USB ICL override, and vendor charging/CPU/GPU/backlight thermal bypass enabled by default with battery and skin temperature safety trips
 - **[NoMount](https://github.com/maxsteeel/nomount)** — Integrated VFS path redirection subsystem (`CONFIG_NOMOUNT=y`)
 - **Root (`-KSU` builds)** — [SukiSU Nova](https://github.com/SukiSU-Nova/SukiSU-Nova), [SUSFS](https://gitlab.com/simonpunk/susfs4ksu) (full feature support), and [KernelPatch (KPM)](https://github.com/bmax121/KernelPatch)
-- **Compiler & Config Tuning** — Built with `-march=armv8.2-a -mtune=cortex-a55`, debug/UBSAN options disabled, 2 MB `ramoops` layout aligned, and watchdog / panic reboot enabled
+- **Compiler Tuning** — Built with `-march=armv8.2-a -mtune=cortex-a55`
 - **Flashing & Companion App** — Universal dual-installer zip and Vector Link companion app
