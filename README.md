@@ -14,6 +14,8 @@ Linux `5.4.302` kernel for Qualcomm Snapdragon 695 (`sm6375` / `blair`), forked 
 - **[TCP BBRv3](https://github.com/google/bbr)** — Default TCP congestion control algorithm
 - **[LZ4](https://github.com/lz4/lz4) & ARM64 String Routines** — Upgraded LZ4 with ARM64 NEON optimizations and backported ARM64 string functions
 
+_Along with many other fixes, optimizations, and subsystem updates backported from upstream Linux, [ACK](https://source.android.com/docs/core/architecture/kernel/android-common), and CAF/CLO._
+
 ## Features & Changes
 
 - **Silver Cluster 691.2 MHz Voltage-Optimal Floor** — Default Silver (`policy0`) minimum frequency set to `691.2 MHz` across all governors at the flat `568 mV` voltage knee point (overridable via `scaling_min_freq`), alongside unlocked `blair.dtsi` Silver/Gold OPP filters
