@@ -25,8 +25,6 @@ NO_BLOCK_DISPLAY=1;
 # boot install
 split_boot;
 
-check_ksu;
-
 flash_boot;
 ## end boot install
 
@@ -41,7 +39,6 @@ reset_ak;
 split_boot;
 
 check_cmdline;
-check_twrp;
 check_vendor_hals;
 
 flash_boot;

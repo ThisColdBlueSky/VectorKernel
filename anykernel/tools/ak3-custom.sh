@@ -8,22 +8,6 @@ check_cmdline() {
   fi;
 }
 
-check_ksu() {
-  if [ -e $AKHOME/KSU_UNLOCK -a -f $AKHOME/ksu.bdf ]; then
-    ui_print " " "Flashing KernelSU version...";
-    ui_print "This is not secure!";
-    bspatch $AKHOME/Image $AKHOME/Image_KSU $AKHOME/ksu.bdf;
-    mv -f $AKHOME/Image_KSU $AKHOME/Image;
-  fi;
-}
-
-check_twrp() {
-  if [ -e $AKHOME/TWRP_LOCK ]; then
-    ui_print " " "TWRP will be disabled.";
-    sed -i '$ s/$/ ignore_builtin_recovery/' $SPLITIMG/header;
-  fi;
-}
-
 check_vendor_hals() {
   grep -q "/vendor " /proc/mounts || mount /vendor;
   if [ $? -eq 0 ]; then
